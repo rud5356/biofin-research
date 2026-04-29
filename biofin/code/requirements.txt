@@ -1,0 +1,8 @@
+pandas==2.3.3
+numpy==2.2.6
+transformers==5.5.4
+sentencepiece
+olefile==0.47
+pypdf==6.10.2
+openpyxl
+safetensors==0.7.0

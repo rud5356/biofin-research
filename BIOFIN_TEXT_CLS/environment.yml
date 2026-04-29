@@ -1,0 +1,17 @@
+name: biofin_text_cls
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pandas
+  - numpy
+  - pip
+  - pip:
+      - torch
+      - transformers
+      - sentencepiece
+      - olefile
+      - pypdf
+      - openpyxl

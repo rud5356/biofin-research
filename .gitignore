@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+.env
+*.log
+.DS_Store
+
+# 데이터 파일
+*.csv
+*.xlsx
+*.zip
+*.pkl
+*.pt
+*.bin
+*.h5
+
+# 대용량 디렉토리
+**/data/
+**/logs/
+**/outputs/
+**/output/
+**/results/
+**/models/
+**/db/
+**/experiments/

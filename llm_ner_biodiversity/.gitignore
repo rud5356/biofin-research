@@ -1,0 +1,18 @@
+# 결과물
+results/*.csv
+results/*.xlsx
+
+# 로그
+logs/
+
+# 데이터
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+
+# Conda
+.conda/

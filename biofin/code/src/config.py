@@ -1,0 +1,33 @@
+from pathlib import Path
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+MODELS_DIR = BASE_DIR / "models"
+
+WORKFILE_DATASET_PATH = DATA_DIR / "workfile_dataset.csv"
+WORKFILE_LABELS_PATH = DATA_DIR / "workfile_labels.csv"
+WORKFILE_UNRESOLVED_PATH = DATA_DIR / "workfile_dataset_unresolved.csv"
+WORKFILE_DATASET_SUMMARY_PATH = DATA_DIR / "workfile_dataset_summary.json"
+WORKFILE_TEXT_DATASET_PATH = DATA_DIR / "workfile_text_dataset.csv"
+WORKFILE_SPLIT_DIR = DATA_DIR / "splits"
+WORKFILE_TRAIN_SPLIT_PATH = WORKFILE_SPLIT_DIR / "workfile_train.csv"
+WORKFILE_VAL_SPLIT_PATH = WORKFILE_SPLIT_DIR / "workfile_val.csv"
+WORKFILE_TEST_SPLIT_PATH = WORKFILE_SPLIT_DIR / "workfile_test.csv"
+WORKFILE_DROPPED_LABELS_PATH = WORKFILE_SPLIT_DIR / "workfile_dropped_labels.csv"
+WORKFILE_SPLIT_SUMMARY_PATH = WORKFILE_SPLIT_DIR / "workfile_split_summary.json"
+WORKFILE_KOBERT_MODEL_DIR = MODELS_DIR / "kobert_workfile_classifier"
+
+DEFAULT_SPLIT_SEED = 42
+DEFAULT_TRAIN_RATIO = 0.8
+DEFAULT_VAL_RATIO = 0.1
+DEFAULT_TEST_RATIO = 0.1
+DEFAULT_MIN_LABEL_COUNT = 3
+DEFAULT_KOBERT_MODEL = "klue/bert-base"
+DEFAULT_MAX_LENGTH = 512
+DEFAULT_BATCH_SIZE = 8
+DEFAULT_NUM_EPOCHS = 3
+DEFAULT_LEARNING_RATE = 2e-5
+DEFAULT_WEIGHT_DECAY = 0.01
+DEFAULT_CLASSIFICATION_TEXT_COLUMN = "model_text"
+DEFAULT_GROUP_COLUMNS = ("ministry_name", "detail_project_name")
