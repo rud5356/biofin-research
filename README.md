@@ -9,22 +9,21 @@
 
 | 폴더 | 설명 |
 |------|------|
-| `biofin/biodiv_cls` | Ollama LLM으로 예산 사업의 생물다양성 관련 여부를 이진 분류 |
-| `biofin/code` | Docker 기반 실행 환경 (배포용) |
-| `BIOFIN_TEXT_CLS` | KoBERT fine-tuning으로 예산 문서를 16개 분야로 분류 |
+| `budget_biodiv_cls` | 재정자료 생물다양성 관련 여부 이진 분류 (Ollama LLM + KoBERT) |
+| `budget_field_cls` | 재정자료 분야별 다중 분류 — HWP/PDF 문서를 16개 예산 분야로 분류 (KoBERT, Docker 지원) |
 | `biodiversity_rag` | 생물다양성 논문 초록 기반 RAG 질의응답 시스템 |
 | `budget_matcher` | 예산 CSV와 열린재정 파일 폴더 매칭 |
 | `llm_ner_biodiversity` | LLM으로 생물다양성 논문에서 개체명(종, 지역 등) 추출 |
 
 ---
 
-## biofin/biodiv_cls
+## budget_biodiv_cls
 
 예산 사업 정보(분야명, 부문명, 프로그램명, 세부사업명)를 Ollama LLM에 입력해  
 생물다양성 관련 여부를 `1 / 0 / -1(실패)` 로 라벨링합니다.
 
 ```bash
-cd biofin/biodiv_cls
+cd budget_biodiv_cls
 pip install -r requirements.txt
 
 python src/make_biodiv_labels.py \
@@ -39,12 +38,12 @@ python src/make_biodiv_labels.py \
 
 ---
 
-## BIOFIN_TEXT_CLS
+## budget_field_cls
 
 HWP/PDF 예산 문서에서 텍스트를 추출하고 `klue/bert-base`를 fine-tuning해  
 16개 예산 분야(환경, 농림수산, 교육 등)를 자동 분류합니다.
 
-자세한 내용은 [BIOFIN_TEXT_CLS/README.md](BIOFIN_TEXT_CLS/README.md) 참조.
+자세한 내용은 [budget_field_cls/README.md](budget_field_cls/README.md) 참조.
 
 ---
 

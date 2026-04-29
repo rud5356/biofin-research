@@ -20,5 +20,6 @@ __pycache__/
 **/output/
 **/results/
 **/models/
+**/model/
 **/db/
 **/experiments/

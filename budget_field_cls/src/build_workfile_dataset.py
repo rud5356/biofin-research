@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import unicodedata
 from collections import Counter, defaultdict
@@ -9,11 +10,15 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+from dotenv import load_dotenv
 
 from config import DATA_DIR
 
+load_dotenv()
 
-DEFAULT_BUDGET_ROOT = Path(r"/workspace/data/국가생물다양성_열린재정 데이터")
+DEFAULT_BUDGET_ROOT = Path(
+    os.getenv("BUDGET_ROOT", "/workspace/data/국가생물다양성_열린재정 데이터")
+)
 DEFAULT_WORKFILE = DEFAULT_BUDGET_ROOT / "사업별결산세출지출현황_2024년도_파일매칭_최종.csv"
 DEFAULT_SHEET_NAME = "match_workfile"
 DEFAULT_EXTENSIONS = (".hwp", ".pdf")
