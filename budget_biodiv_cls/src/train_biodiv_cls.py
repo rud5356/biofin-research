@@ -12,6 +12,7 @@ biodiv_label(0/1)을 예측합니다. -1(실패) 라벨은 제외합니다.
 from __future__ import annotations
 
 import argparse
+import json
 import random
 from pathlib import Path
 
@@ -36,6 +37,7 @@ DEFAULT_DATA_CSV = BIODIV_TEXT_DATASET_CSV
 DEFAULT_MODEL_NAME = "klue/roberta-small"
 DEFAULT_OUTPUT_DIR = MODEL_DIR
 DEFAULT_TEXT_COL = DOCUMENT_TEXT_COLUMN
+DEFAULT_UNDERSAMPLE_RATIO = 3.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,11 +54,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-cuda", action="store_true")
     parser.add_argument(
+        "--balance-mode",
+        choices=["pos_weight", "undersample", "none"],
+        default="pos_weight",
+        help="클래스 불균형 처리 방식. 기본값: pos_weight",
+    )
+    parser.add_argument(
         "--undersample-ratio",
         type=float,
-        default=None,
+        default=DEFAULT_UNDERSAMPLE_RATIO,
         metavar="R",
-        help="학습 셋 언더샘플링: 음성 샘플을 양성의 R배로 줄임 (예: 3.0 → neg:pos=3:1). 기본값: 미적용",
+        help="balance-mode=undersample일 때 음성 샘플을 양성의 R배로 줄임. 기본값: 3.0",
+    )
+    parser.add_argument(
+        "--threshold-min",
+        type=float,
+        default=0.05,
+        help="검증 F1 threshold 탐색 최소값",
+    )
+    parser.add_argument(
+        "--threshold-max",
+        type=float,
+        default=0.95,
+        help="검증 F1 threshold 탐색 최대값",
+    )
+    parser.add_argument(
+        "--threshold-step",
+        type=float,
+        default=0.01,
+        help="검증 F1 threshold 탐색 간격",
     )
     return parser.parse_args()
 
@@ -168,7 +194,7 @@ def evaluate(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
-) -> tuple[float, float, float, float, list, list, list]:
+) -> tuple[list[int], list[float], float]:
     model.eval()
     all_probs: list[float] = []
     all_labels: list[int] = []
@@ -180,12 +206,52 @@ def evaluate(
         all_probs.extend(probs if isinstance(probs, list) else [probs])
         all_labels.extend(batch["label"].numpy().astype(int).tolist())
 
-    preds = [1 if p >= 0.5 else 0 for p in all_probs]
-    f1 = f1_score(all_labels, preds, pos_label=1, zero_division=0)
-    precision = precision_score(all_labels, preds, pos_label=1, zero_division=0)
-    recall = recall_score(all_labels, preds, pos_label=1, zero_division=0)
     auc = roc_auc_score(all_labels, all_probs) if len(set(all_labels)) > 1 else 0.0
-    return f1, precision, recall, auc, all_labels, preds, all_probs
+    return all_labels, all_probs, auc
+
+
+def metrics_at_threshold(
+    labels: list[int],
+    probs: list[float],
+    threshold: float,
+) -> tuple[float, float, float, list[int]]:
+    preds = [1 if p >= threshold else 0 for p in probs]
+    f1 = f1_score(labels, preds, pos_label=1, zero_division=0)
+    precision = precision_score(labels, preds, pos_label=1, zero_division=0)
+    recall = recall_score(labels, preds, pos_label=1, zero_division=0)
+    return f1, precision, recall, preds
+
+
+def find_best_threshold(
+    labels: list[int],
+    probs: list[float],
+    threshold_min: float,
+    threshold_max: float,
+    threshold_step: float,
+) -> tuple[float, float, float, float, list[int]]:
+    if threshold_step <= 0:
+        raise ValueError("--threshold-step은 0보다 커야 합니다.")
+    if not 0 <= threshold_min <= threshold_max <= 1:
+        raise ValueError("--threshold-min/max는 0~1 범위에서 min <= max 여야 합니다.")
+
+    best_threshold = threshold_min
+    best_f1 = -1.0
+    best_precision = 0.0
+    best_recall = 0.0
+    best_preds: list[int] = []
+
+    thresholds = np.arange(threshold_min, threshold_max + threshold_step / 2, threshold_step)
+    for threshold in thresholds:
+        threshold = float(min(threshold, threshold_max))
+        f1, precision, recall, preds = metrics_at_threshold(labels, probs, threshold)
+        if f1 > best_f1:
+            best_threshold = threshold
+            best_f1 = f1
+            best_precision = precision
+            best_recall = recall
+            best_preds = preds
+
+    return best_threshold, best_f1, best_precision, best_recall, best_preds
 
 
 def main() -> int:
@@ -231,7 +297,9 @@ def main() -> int:
     )
     print(f"학습: {len(train_texts)}행  검증: {len(val_texts)}행")
 
-    if args.undersample_ratio is not None:
+    if args.balance_mode == "undersample":
+        if args.undersample_ratio <= 0:
+            raise ValueError("--undersample-ratio는 0보다 커야 합니다.")
         train_texts, train_labels = undersample(
             train_texts, train_labels, args.undersample_ratio, args.seed
         )
@@ -241,6 +309,8 @@ def main() -> int:
             f"언더샘플링 후: {len(train_texts)}행  "
             f"(관련(1): {u_pos}, 비관련(0): {u_neg}, ratio={args.undersample_ratio:.1f})"
         )
+    else:
+        print(f"불균형 처리: {args.balance_mode}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     model = AutoModelForSequenceClassification.from_pretrained(
@@ -253,38 +323,75 @@ def main() -> int:
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size)
 
-    # 클래스 불균형 보정: 학습 셋 neg/pos 비율을 pos_weight로 사용
     train_n_pos = sum(train_labels)
     train_n_neg = len(train_labels) - train_n_pos
-    pos_weight = torch.tensor([train_n_neg / train_n_pos], dtype=torch.float).to(device)
-    print(f"pos_weight: {pos_weight.item():.2f}")
+    if train_n_pos == 0 or train_n_neg == 0:
+        raise ValueError("학습 셋에 biodiv_label 0과 1이 모두 필요합니다.")
 
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    if args.balance_mode == "pos_weight":
+        # 클래스 불균형 보정: 학습 셋 neg/pos 비율을 pos_weight로 사용
+        pos_weight = torch.tensor([train_n_neg / train_n_pos], dtype=torch.float).to(device)
+        print(f"pos_weight: {pos_weight.item():.2f}")
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    else:
+        criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     best_f1, best_epoch = -1.0, 0
+    best_threshold = 0.5
     final_labels: list[int] = []
     final_preds: list[int] = []
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
-        f1, precision, recall, auc, v_labels, v_preds, _ = evaluate(model, val_loader, device)
+        v_labels, v_probs, auc = evaluate(model, val_loader, device)
+        threshold, f1, precision, recall, v_preds = find_best_threshold(
+            v_labels,
+            v_probs,
+            args.threshold_min,
+            args.threshold_max,
+            args.threshold_step,
+        )
         print(
             f"Epoch {epoch:2d} | loss={train_loss:.4f} | "
-            f"P={precision:.4f} | R={recall:.4f} | F1={f1:.4f} | AUC={auc:.4f}"
+            f"thr={threshold:.2f} | P={precision:.4f} | R={recall:.4f} | "
+            f"F1={f1:.4f} | AUC={auc:.4f}"
         )
 
         if f1 > best_f1:
             best_f1 = f1
             best_epoch = epoch
+            best_threshold = threshold
             final_labels = v_labels
             final_preds = v_preds
             model.save_pretrained(args.output_dir)
             tokenizer.save_pretrained(args.output_dir)
-            print(f"  → 최고 모델 저장 (F1={best_f1:.4f})")
+            metadata = {
+                "best_epoch": int(best_epoch),
+                "best_threshold": float(best_threshold),
+                "best_f1": float(best_f1),
+                "best_precision": float(precision),
+                "best_recall": float(recall),
+                "best_auc": float(auc),
+                "model_name": args.model_name,
+                "data_csv": str(args.data_csv),
+                "text_col": args.text_col,
+                "max_len": int(args.max_len),
+                "balance_mode": args.balance_mode,
+                "undersample_ratio": float(args.undersample_ratio),
+                "threshold_min": float(args.threshold_min),
+                "threshold_max": float(args.threshold_max),
+                "threshold_step": float(args.threshold_step),
+                "seed": int(args.seed),
+            }
+            (args.output_dir / "training_metadata.json").write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"  → 최고 모델 저장 (F1={best_f1:.4f}, threshold={best_threshold:.2f})")
 
-    print(f"\n최고 F1: {best_f1:.4f}  (epoch {best_epoch})")
+    print(f"\n최고 F1: {best_f1:.4f}  (epoch {best_epoch}, threshold {best_threshold:.2f})")
     if final_labels:
         print("\n=== 최고 모델 검증 결과 ===")
         print(
