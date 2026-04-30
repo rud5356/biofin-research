@@ -9,15 +9,17 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
+from config import BIODIV_LABELED_CSV, LABEL_COLUMN, METADATA_COLUMNS, SOURCE_MATCHED_CSV
+
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_MODEL = "llama3.2:latest"
-DEFAULT_OUTPUT_COLUMN = "biodiv_label"
+DEFAULT_OUTPUT_COLUMN = LABEL_COLUMN
 
-INPUT_CSV = Path(r"C:\Yuna\biofin\data\국가생물다양성_열린재정 데이터\사업별결산세출지출현황_2024년도_파일매칭_최종.csv")
-OUTPUT_CSV = Path(r"C:\Yuna\biofin\biodiv_cls\data\사업별결산세출지출현황_2024년도_biodiv_labeled.csv")
+INPUT_CSV = SOURCE_MATCHED_CSV
+OUTPUT_CSV = BIODIV_LABELED_CSV
 
-TEXT_COLUMNS = ["분야명", "부문명", "프로그램명", "세부사업명"]
+TEXT_COLUMNS = list(METADATA_COLUMNS[1:])
 
 PROMPT_TEMPLATE = """\
 다음은 대한민국 정부 예산 사업 정보입니다.
@@ -74,7 +76,6 @@ def run(args: argparse.Namespace) -> int:
         df = df.head(args.limit)
         print(f"--limit {args.limit} 적용")
 
-    # 재시작 시 이어서 처리
     start_index = 0
     if args.output_csv.exists():
         done = pd.read_csv(args.output_csv, encoding="utf-8-sig")

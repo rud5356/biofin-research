@@ -1,7 +1,7 @@
 """
 KLUE/RoBERTa-small 기반 생물다양성 이진 분류 학습 스크립트.
 
-4개 텍스트 컬럼(분야명, 부문명, 프로그램명, 세부사업명)을 이어 붙여
+clean_document_text 컬럼(문서 본문 또는 메타데이터 fallback)을 사용해
 biodiv_label(0/1)을 예측합니다. -1(실패) 라벨은 제외합니다.
 
 사용 예:
@@ -24,21 +24,27 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-DEFAULT_DATA_CSV = (
-    Path(__file__).parents[1] / "data" / "사업별결산세출지출현황_2024년도_biodiv_labeled.csv"
+from config import (
+    BIODIV_TEXT_DATASET_CSV,
+    DOCUMENT_TEXT_COLUMN,
+    LABEL_COLUMN,
+    METADATA_COLUMNS,
+    MODEL_DIR,
 )
+
+DEFAULT_DATA_CSV = BIODIV_TEXT_DATASET_CSV
 DEFAULT_MODEL_NAME = "klue/roberta-small"
-DEFAULT_OUTPUT_DIR = Path(__file__).parents[1] / "model"
-TEXT_COLUMNS = ["분야명", "부문명", "프로그램명", "세부사업명"]
-LABEL_COL = "biodiv_label"
+DEFAULT_OUTPUT_DIR = MODEL_DIR
+DEFAULT_TEXT_COL = DOCUMENT_TEXT_COLUMN
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="생물다양성 이진 분류 모델 학습")
     parser.add_argument("--data-csv", type=Path, default=DEFAULT_DATA_CSV)
+    parser.add_argument("--text-col", default=DEFAULT_TEXT_COL)
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--max-len", type=int, default=128)
+    parser.add_argument("--max-len", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=2e-5)
@@ -80,9 +86,27 @@ def undersample(
     return [texts[i] for i in indices], [labels[i] for i in indices]
 
 
-def build_text(row: pd.Series) -> str:
-    parts = [str(row.get(col, "") or "").strip() for col in TEXT_COLUMNS]
-    return " | ".join(p for p in parts if p)
+def clean_cell(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value or "").strip()
+    return "" if text.lower() in {"nan", "none"} else text
+
+
+def build_metadata_fallback_text(row: pd.Series) -> str:
+    parts = []
+    for col in METADATA_COLUMNS:
+        value = clean_cell(row.get(col, ""))
+        if value:
+            parts.append(f"{col}: {value}")
+    return "\n".join(parts)
+
+
+def build_text(row: pd.Series, text_col: str) -> str:
+    text = clean_cell(row.get(text_col, ""))
+    if text:
+        return text
+    return build_metadata_fallback_text(row)
 
 
 class BiodivDataset(Dataset):
@@ -164,7 +188,7 @@ def evaluate(
     return f1, precision, recall, auc, all_labels, preds, all_probs
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     set_seed(args.seed)
     device = torch.device(
@@ -173,8 +197,10 @@ def main() -> None:
     print(f"Device: {device}")
 
     df = pd.read_csv(args.data_csv, encoding="utf-8-sig")
-    df = df[df[LABEL_COL].isin([0, 1])].reset_index(drop=True)
-    n_pos = int(df[LABEL_COL].sum())
+    if args.text_col not in df.columns:
+        raise ValueError(f"입력 CSV에 텍스트 컬럼이 없습니다: {args.text_col}")
+    df = df[df[LABEL_COLUMN].isin([0, 1])].reset_index(drop=True)
+    n_pos = int(df[LABEL_COLUMN].sum())
     n_neg = len(df) - n_pos
     print(f"유효 데이터: {len(df)}행  (관련(1): {n_pos}, 비관련(0): {n_neg})")
     if n_pos == 0 or n_neg == 0:
@@ -182,8 +208,19 @@ def main() -> None:
     if min(n_pos, n_neg) < 2:
         raise ValueError("stratify 검증 분할을 위해 각 라벨이 최소 2개 이상 필요합니다.")
 
-    texts = [build_text(row) for _, row in df.iterrows()]
-    labels = df[LABEL_COL].astype(int).tolist()
+    if "text_source" in df.columns:
+        source_counts = df["text_source"].fillna("").replace("", "unknown").value_counts()
+        print("입력 소스 분포: " + ", ".join(f"{name}={count}" for name, count in source_counts.items()))
+
+    texts = [build_text(row, args.text_col) for _, row in df.iterrows()]
+    labels = df[LABEL_COLUMN].astype(int).tolist()
+    non_empty = [(text, label) for text, label in zip(texts, labels) if text.strip()]
+    dropped_empty = len(texts) - len(non_empty)
+    if dropped_empty:
+        print(f"빈 텍스트 제외: {dropped_empty}행")
+    if not non_empty:
+        raise ValueError("학습 가능한 텍스트가 없습니다.")
+    texts, labels = map(list, zip(*non_empty))
 
     train_texts, val_texts, train_labels, val_labels = train_test_split(
         texts,
@@ -259,7 +296,8 @@ def main() -> None:
             )
         )
     print(f"모델 저장 위치: {args.output_dir}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

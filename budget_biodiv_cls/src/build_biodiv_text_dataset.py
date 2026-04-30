@@ -1,18 +1,3 @@
-"""
-Build a document-text dataset for biodiversity budget classification.
-
-For each labeled budget row, this script tries to read the matched HWP/PDF
-document from the 열린재정 document folder. If no usable document text is
-available, it falls back to budget metadata such as 소관명, 분야명, and 세부사업명.
-
-The output always includes clean_document_text and biodiv_label. Extra audit
-columns are kept by default so extraction failures can be reviewed later.
-
-Usage:
-    python src/build_biodiv_text_dataset.py
-    python src/build_biodiv_text_dataset.py --minimal-output
-    python src/build_biodiv_text_dataset.py --docs-dir "C:/path/to/docs"
-"""
 from __future__ import annotations
 
 import argparse
@@ -28,40 +13,43 @@ from urllib.parse import unquote
 
 try:
     import olefile
-except ImportError:  # pragma: no cover - environment check
+except ImportError:
     olefile = None
 
 try:
     from pypdf import PdfReader
-except ImportError:  # pragma: no cover - environment check
+except ImportError:
     PdfReader = None
 
+from config import (
+    BIODIV_LABELED_CSV,
+    BIODIV_TEXT_DATASET_CSV,
+    BIODIV_TEXT_DATASET_SUMMARY_JSON,
+    DOCUMENT_TEXT_COLUMN,
+    LABEL_COLUMN,
+    MATCHED_FILENAME_COLUMN,
+    METADATA_COLUMNS,
+    SOURCE_DOCS_DIR,
+)
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-REPO_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_INPUT_CSV = BASE_DIR / "data" / "사업별결산세출지출현황_2024년도_biodiv_labeled.csv"
-DEFAULT_DOCS_DIR = REPO_DIR / "국가생물다양성_열린재정 데이터"
-DEFAULT_OUTPUT_CSV = BASE_DIR / "data" / "biodiv_document_text_dataset.csv"
-DEFAULT_SUMMARY_JSON = BASE_DIR / "data" / "biodiv_document_text_dataset_summary.json"
+DEFAULT_INPUT_CSV = BIODIV_LABELED_CSV
+DEFAULT_DOCS_DIR = SOURCE_DOCS_DIR
+DEFAULT_OUTPUT_CSV = BIODIV_TEXT_DATASET_CSV
+DEFAULT_SUMMARY_JSON = BIODIV_TEXT_DATASET_SUMMARY_JSON
 
-LABEL_COL = "biodiv_label"
-DOCUMENT_TEXT_COL = "clean_document_text"
-MATCHED_FILENAME_COL = "matched_filename"
-METADATA_COLUMNS = ["소관명", "분야명", "부문명", "프로그램명", "단위사업명", "세부사업명"]
 SUPPORTED_EXTENSIONS = {".hwp", ".pdf"}
 PLACEHOLDER_FILENAMES = {"", "x", "X", "-", "없음", "미입력", "na", "n/a", "nan", "none"}
 
 _HWP_PARA_TEXT_TAG = 67
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _DISALLOWED_CHAR_RE = re.compile(
-    r"[^0-9A-Za-z가-힣ㄱ-ㅎㅏ-ㅣ\s\.,;:!?%()/\-\[\]{}<>&+*'\"“”‘’·,~_=#@○△▲▽▼□■※ㆍ]"
+    r"[^0-9A-Za-z가-힣ㄱ-ㅎㅏ-ㅣ\s\.,;:!?%()/\-\[\]{}<>&+*'\"""''·,~_=#@○△▲▽▼□■※ㆍ]"
 )
 _WHITESPACE_RE = re.compile(r"[ \t\f\v]+")
 _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 _TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")
 _PURPOSE_START_PATTERNS = [
     re.compile(r"(?im)^\s*(?:[0-9]+[.)]\s*)?(?:사업\s*)?목적\s*(?:[·ㆍ.\-/]\s*내용)?"),
-    re.compile(r"(?im)^\s*(?:[0-9]+[.)]\s*)?사업\s*목적\s*(?:[·ㆍ.\-/]\s*내용)?"),
     re.compile(r"(?im)^\s*[□○◦ㅇ\-]\s*사업\s*목적\s*(?:[·ㆍ.\-/]\s*내용)?"),
 ]
 
@@ -239,13 +227,7 @@ def _extract_hwp_preview_text(path: Path) -> str:
     with olefile.OleFileIO(str(path)) as ole:
         if not ole.exists("PrvText"):
             return ""
-        preview = ole.openstream("PrvText").read()
-        for encoding in ("utf-16le", "utf-8", "cp949"):
-            try:
-                return preview.decode(encoding, errors="ignore")
-            except UnicodeDecodeError:
-                continue
-    return ""
+        return ole.openstream("PrvText").read().decode("utf-16le", errors="ignore")
 
 
 def extract_hwp_text(path: Path) -> tuple[str, str]:
@@ -308,6 +290,13 @@ def with_source_prefix(text: str, source: str, enabled: bool) -> str:
     return f"입력유형: {label}\n{text}"
 
 
+def safe_relative_path(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
 def build_document_text_for_row(
     row: dict[str, object],
     docs_dir: Path,
@@ -315,7 +304,7 @@ def build_document_text_for_row(
     add_source_prefix: bool,
     metadata_fallback_on_missing_anchor: bool,
 ) -> dict[str, object]:
-    filenames = split_matched_filenames(row.get(MATCHED_FILENAME_COL, ""))
+    filenames = split_matched_filenames(row.get(MATCHED_FILENAME_COLUMN, ""))
     extracted_texts: list[str] = []
     resolved_paths: list[Path] = []
     resolution_statuses: list[str] = []
@@ -341,7 +330,7 @@ def build_document_text_for_row(
             if text:
                 extracted_texts.append(text)
                 status = "document_ok"
-        except Exception as exc:  # pragma: no cover - file level error path
+        except Exception as exc:
             extract_errors.append(f"{path.name}: {exc}")
             status = "extract_error"
 
@@ -366,7 +355,7 @@ def build_document_text_for_row(
     clean_document_text = with_source_prefix(clean_document_text, text_source, add_source_prefix)
 
     return {
-        DOCUMENT_TEXT_COL: clean_document_text,
+        DOCUMENT_TEXT_COLUMN: clean_document_text,
         "text_source": text_source,
         "document_status": status,
         "purpose_anchor_found": purpose_anchor_found,
@@ -380,13 +369,6 @@ def build_document_text_for_row(
     }
 
 
-def safe_relative_path(path: Path, root: Path) -> str:
-    try:
-        return str(path.relative_to(root))
-    except ValueError:
-        return str(path)
-
-
 def build_rows(
     input_rows: list[dict[str, object]],
     docs_dir: Path,
@@ -397,12 +379,12 @@ def build_rows(
     total = len(input_rows)
 
     for index, row in enumerate(input_rows, start=1):
-        label = parse_label(row.get(LABEL_COL, ""))
+        label = parse_label(row.get(LABEL_COLUMN, ""))
         if label is None:
             continue
 
         if index == 1 or index == total or index % 50 == 0:
-            print(f"[{index}/{total}] processing {clean_cell(row.get(MATCHED_FILENAME_COL, ''))}")
+            print(f"[{index}/{total}] processing {clean_cell(row.get(MATCHED_FILENAME_COLUMN, ''))}")
 
         text_info = build_document_text_for_row(
             row=row,
@@ -414,8 +396,8 @@ def build_rows(
 
         output_row = {
             "No.": row.get("No.", ""),
-            MATCHED_FILENAME_COL: row.get(MATCHED_FILENAME_COL, ""),
-            LABEL_COL: label,
+            MATCHED_FILENAME_COLUMN: row.get(MATCHED_FILENAME_COLUMN, ""),
+            LABEL_COLUMN: label,
             **{column: row.get(column, "") for column in METADATA_COLUMNS},
             **text_info,
         }
@@ -435,13 +417,9 @@ def read_csv_rows(path: Path, limit: int) -> list[dict[str, object]]:
 
 def write_csv_rows(path: Path, rows: list[dict[str, object]], minimal_output: bool) -> None:
     if minimal_output:
-        fieldnames = [DOCUMENT_TEXT_COL, LABEL_COL]
+        fieldnames = [DOCUMENT_TEXT_COLUMN, LABEL_COLUMN]
     else:
-        fieldnames = []
-        for row in rows:
-            for key in row:
-                if key not in fieldnames:
-                    fieldnames.append(key)
+        fieldnames = list(dict.fromkeys(key for row in rows for key in row))
 
     with path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames, extrasaction="ignore")
@@ -457,7 +435,7 @@ def write_outputs(rows: list[dict[str, object]], args: argparse.Namespace) -> No
     summary = {
         "output_csv": str(output_csv),
         "row_count": len(rows),
-        "label_counts": dict(Counter(row[LABEL_COL] for row in rows)),
+        "label_counts": dict(Counter(row[LABEL_COLUMN] for row in rows)),
         "text_source_counts": dict(Counter(row["text_source"] for row in rows)),
         "document_status_counts": dict(Counter(row["document_status"] for row in rows)),
         "purpose_anchor_counts": dict(Counter(str(row["purpose_anchor_found"]) for row in rows)),
@@ -489,7 +467,7 @@ def main() -> int:
     args = parse_args()
     try:
         return run(args)
-    except Exception as exc:  # pragma: no cover - CLI error path
+    except Exception as exc:
         print(f"ERROR: {exc}")
         return 1
 
