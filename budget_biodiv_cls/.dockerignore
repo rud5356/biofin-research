@@ -1,0 +1,8 @@
+data/
+model/
+models/
+logs/
+experiments/
+__pycache__/
+*.pyc
+.git/

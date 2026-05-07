@@ -1,13 +1,12 @@
 """
-KLUE/RoBERTa-small 기반 생물다양성 이진 분류 학습 스크립트.
+KoBigBird 기반 생물다양성 긴문서 이진 분류 학습 스크립트.
 
-clean_document_text 컬럼(문서 본문 또는 메타데이터 fallback)을 사용해
-label_v2(0/1)을 예측합니다. -1(실패) 라벨은 제외합니다.
+기본적으로 biodiv_document_text_dataset_labeled_v2.csv의 clean_document_text를
+최대 2048 토큰까지 입력하고 label_v2(0/1)를 예측합니다.
 
 사용 예:
-    python train_biodiv_cls.py
-    python train_biodiv_cls.py --epochs 15 --batch-size 32
-    python train_biodiv_cls.py --model-name klue/bert-base
+    python src/train_biodiv_long_cls.py
+    python src/train_biodiv_long_cls.py --max-len 4096 --batch-size 1 --grad-accum-steps 8
 """
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.metrics import classification_report, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -32,60 +31,13 @@ from config import (
     MODEL_DIR,
 )
 
+
 DEFAULT_DATA_CSV = BIODIV_TEXT_LABELED_V2_CSV
-DEFAULT_MODEL_NAME = "klue/roberta-small"
-DEFAULT_OUTPUT_DIR = MODEL_DIR / "label_v2"
+DEFAULT_MODEL_NAME = "monologg/kobigbird-bert-base"
+DEFAULT_OUTPUT_DIR = MODEL_DIR / "label_v2_long"
 DEFAULT_TEXT_COL = DOCUMENT_TEXT_COLUMN
 DEFAULT_LABEL_COL = "label_v2"
 DEFAULT_UNDERSAMPLE_RATIO = 3.0
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="생물다양성 이진 분류 모델 학습")
-    parser.add_argument("--data-csv", type=Path, default=DEFAULT_DATA_CSV)
-    parser.add_argument("--text-col", default=DEFAULT_TEXT_COL)
-    parser.add_argument("--label-col", default=DEFAULT_LABEL_COL)
-    parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--max-len", type=int, default=512)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--lr", type=float, default=2e-5)
-    parser.add_argument("--val-ratio", type=float, default=0.15)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--no-cuda", action="store_true")
-    parser.add_argument(
-        "--balance-mode",
-        choices=["pos_weight", "undersample", "none"],
-        default="pos_weight",
-        help="클래스 불균형 처리 방식. 기본값: pos_weight",
-    )
-    parser.add_argument(
-        "--undersample-ratio",
-        type=float,
-        default=DEFAULT_UNDERSAMPLE_RATIO,
-        metavar="R",
-        help="balance-mode=undersample일 때 음성 샘플을 양성의 R배로 줄임. 기본값: 3.0",
-    )
-    parser.add_argument(
-        "--threshold-min",
-        type=float,
-        default=0.05,
-        help="검증 F1 threshold 탐색 최소값",
-    )
-    parser.add_argument(
-        "--threshold-max",
-        type=float,
-        default=0.95,
-        help="검증 F1 threshold 탐색 최대값",
-    )
-    parser.add_argument(
-        "--threshold-step",
-        type=float,
-        default=0.01,
-        help="검증 F1 threshold 탐색 간격",
-    )
-    return parser.parse_args()
 
 
 def set_seed(seed: int) -> None:
@@ -102,7 +54,6 @@ def undersample(
     ratio: float,
     seed: int,
 ) -> tuple[list[str], list[int]]:
-    """음성 샘플을 양성의 ratio배 수로 줄인 학습 셋을 반환."""
     rng = random.Random(seed)
     pos_idx = [i for i, lb in enumerate(labels) if lb == 1]
     neg_idx = [i for i, lb in enumerate(labels) if lb == 0]
@@ -167,29 +118,6 @@ class BiodivDataset(Dataset):
         }
 
 
-def train_epoch(
-    model: nn.Module,
-    loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    criterion: nn.Module,
-    device: torch.device,
-) -> float:
-    model.train()
-    total_loss = 0.0
-    for batch in loader:
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        labels = batch["label"].to(device)
-
-        optimizer.zero_grad()
-        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits.squeeze(-1)
-        loss = criterion(logits, labels)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-    return total_loss / len(loader)
-
-
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
@@ -207,6 +135,8 @@ def evaluate(
         all_probs.extend(probs if isinstance(probs, list) else [probs])
         all_labels.extend(batch["label"].numpy().astype(int).tolist())
 
+    from sklearn.metrics import roc_auc_score
+
     auc = roc_auc_score(all_labels, all_probs) if len(set(all_labels)) > 1 else 0.0
     return all_labels, all_probs, auc
 
@@ -216,6 +146,8 @@ def metrics_at_threshold(
     probs: list[float],
     threshold: float,
 ) -> tuple[float, float, float, list[int]]:
+    from sklearn.metrics import f1_score, precision_score, recall_score
+
     preds = [1 if p >= threshold else 0 for p in probs]
     f1 = f1_score(labels, preds, pos_label=1, zero_division=0)
     precision = precision_score(labels, preds, pos_label=1, zero_division=0)
@@ -255,14 +187,92 @@ def find_best_threshold(
     return best_threshold, best_f1, best_precision, best_recall, best_preds
 
 
-def main() -> int:
-    args = parse_args()
-    set_seed(args.seed)
-    device = torch.device(
-        "cpu" if args.no_cuda or not torch.cuda.is_available() else "cuda"
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="생물다양성 긴문서 이진 분류 모델 학습")
+    parser.add_argument("--data-csv", type=Path, default=DEFAULT_DATA_CSV)
+    parser.add_argument("--text-col", default=DEFAULT_TEXT_COL)
+    parser.add_argument("--label-col", default=DEFAULT_LABEL_COL)
+    parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--max-len", type=int, default=2048)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--eval-batch-size", type=int, default=1)
+    parser.add_argument("--grad-accum-steps", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--val-ratio", type=float, default=0.15)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no-cuda", action="store_true")
+    parser.add_argument("--fp16", action="store_true", help="CUDA 사용 시 AMP fp16 학습")
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        help="GPU 메모리를 줄이기 위해 gradient checkpointing 사용",
     )
-    print(f"Device: {device}")
+    parser.add_argument(
+        "--attention-type",
+        choices=["block_sparse", "original_full"],
+        default="block_sparse",
+        help="BigBird attention 방식. 긴문서는 block_sparse 권장",
+    )
+    parser.add_argument("--block-size", type=int, default=64)
+    parser.add_argument("--num-random-blocks", type=int, default=3)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--balance-mode",
+        choices=["pos_weight", "undersample", "none"],
+        default="pos_weight",
+        help="클래스 불균형 처리 방식. 기본값: pos_weight",
+    )
+    parser.add_argument(
+        "--undersample-ratio",
+        type=float,
+        default=DEFAULT_UNDERSAMPLE_RATIO,
+        metavar="R",
+        help="balance-mode=undersample일 때 음성 샘플을 양성의 R배로 줄임",
+    )
+    parser.add_argument("--threshold-min", type=float, default=0.05)
+    parser.add_argument("--threshold-max", type=float, default=0.95)
+    parser.add_argument("--threshold-step", type=float, default=0.01)
+    return parser.parse_args()
 
+
+def train_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    criterion: nn.Module,
+    device: torch.device,
+    grad_accum_steps: int,
+    use_fp16: bool,
+) -> float:
+    model.train()
+    total_loss = 0.0
+    optimizer.zero_grad(set_to_none=True)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
+
+    for step, batch in enumerate(loader, start=1):
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["label"].to(device)
+
+        with torch.cuda.amp.autocast(enabled=use_fp16):
+            logits = model(input_ids=input_ids, attention_mask=attention_mask).logits.squeeze(-1)
+            loss = criterion(logits, labels)
+            loss_for_backward = loss / grad_accum_steps
+
+        scaler.scale(loss_for_backward).backward()
+        total_loss += loss.item()
+
+        if step % grad_accum_steps == 0 or step == len(loader):
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+    return total_loss / len(loader)
+
+
+def load_training_frame(args: argparse.Namespace) -> tuple[list[str], list[int], pd.DataFrame]:
     df = pd.read_csv(args.data_csv, encoding="utf-8-sig")
     if args.text_col not in df.columns:
         raise ValueError(f"입력 CSV에 텍스트 컬럼이 없습니다: {args.text_col}")
@@ -272,6 +282,7 @@ def main() -> int:
     df[args.label_col] = pd.to_numeric(df[args.label_col], errors="coerce")
     df = df[df[args.label_col].isin([0, 1])].reset_index(drop=True)
     df[args.label_col] = df[args.label_col].astype(int)
+
     n_pos = int(df[args.label_col].sum())
     n_neg = len(df) - n_pos
     print(f"유효 데이터: {len(df)}행  (관련(1): {n_pos}, 비관련(0): {n_neg})")
@@ -292,8 +303,28 @@ def main() -> int:
         print(f"빈 텍스트 제외: {dropped_empty}행")
     if not non_empty:
         raise ValueError("학습 가능한 텍스트가 없습니다.")
-    texts, labels = map(list, zip(*non_empty))
 
+    texts, labels = map(list, zip(*non_empty))
+    return texts, labels, df
+
+
+def main() -> int:
+    args = parse_args()
+    if args.batch_size <= 0 or args.eval_batch_size <= 0:
+        raise ValueError("--batch-size와 --eval-batch-size는 0보다 커야 합니다.")
+    if args.grad_accum_steps <= 0:
+        raise ValueError("--grad-accum-steps는 0보다 커야 합니다.")
+
+    set_seed(args.seed)
+    device = torch.device(
+        "cpu" if args.no_cuda or not torch.cuda.is_available() else "cuda"
+    )
+    use_fp16 = bool(args.fp16 and device.type == "cuda")
+    print(f"Device: {device}")
+    print(f"Model: {args.model_name}")
+    print(f"max_len: {args.max_len}, batch_size: {args.batch_size}, grad_accum_steps: {args.grad_accum_steps}")
+
+    texts, labels, _ = load_training_frame(args)
     train_texts, val_texts, train_labels, val_labels = train_test_split(
         texts,
         labels,
@@ -319,15 +350,33 @@ def main() -> int:
         print(f"불균형 처리: {args.balance_mode}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    if args.max_len > getattr(tokenizer, "model_max_length", args.max_len):
+        print(f"주의: tokenizer model_max_length={tokenizer.model_max_length}, 요청 max_len={args.max_len}")
+
     model = AutoModelForSequenceClassification.from_pretrained(
-        args.model_name, num_labels=1
+        args.model_name,
+        num_labels=1,
+        attention_type=args.attention_type,
+        block_size=args.block_size,
+        num_random_blocks=args.num_random_blocks,
     )
+    if args.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
     model.to(device)
 
     train_ds = BiodivDataset(train_texts, train_labels, tokenizer, args.max_len)
     val_ds = BiodivDataset(val_texts, val_labels, tokenizer, args.max_len)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=args.eval_batch_size,
+        num_workers=args.num_workers,
+    )
 
     train_n_pos = sum(train_labels)
     train_n_neg = len(train_labels) - train_n_pos
@@ -335,7 +384,6 @@ def main() -> int:
         raise ValueError(f"학습 셋에 {args.label_col} 0과 1이 모두 필요합니다.")
 
     if args.balance_mode == "pos_weight":
-        # 클래스 불균형 보정: 학습 셋 neg/pos 비율을 pos_weight로 사용
         pos_weight = torch.tensor([train_n_neg / train_n_pos], dtype=torch.float).to(device)
         print(f"pos_weight: {pos_weight.item():.2f}")
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -350,7 +398,15 @@ def main() -> int:
     final_preds: list[int] = []
 
     for epoch in range(1, args.epochs + 1):
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+        train_loss = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            criterion,
+            device,
+            args.grad_accum_steps,
+            use_fp16,
+        )
         v_labels, v_probs, auc = evaluate(model, val_loader, device)
         threshold, f1, precision, recall, v_preds = find_best_threshold(
             v_labels,
@@ -385,8 +441,16 @@ def main() -> int:
                 "text_col": args.text_col,
                 "label_col": args.label_col,
                 "max_len": int(args.max_len),
+                "batch_size": int(args.batch_size),
+                "eval_batch_size": int(args.eval_batch_size),
+                "grad_accum_steps": int(args.grad_accum_steps),
                 "balance_mode": args.balance_mode,
                 "undersample_ratio": float(args.undersample_ratio),
+                "attention_type": args.attention_type,
+                "block_size": int(args.block_size),
+                "num_random_blocks": int(args.num_random_blocks),
+                "fp16": bool(use_fp16),
+                "gradient_checkpointing": bool(args.gradient_checkpointing),
                 "threshold_min": float(args.threshold_min),
                 "threshold_max": float(args.threshold_max),
                 "threshold_step": float(args.threshold_step),
