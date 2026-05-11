@@ -22,7 +22,8 @@ make_biodiv_labels.py --version v2
     → biodiv_document_text_dataset_labeled_v2.csv (문서 본문 기반 엄격 라벨)
     │
     ├──▶ train_biodiv_cls.py       → model/label_v2/          (RoBERTa-small, 512 토큰)
-    └──▶ train_biodiv_long_cls.py  → model/label_v2_long/     (KoBigBird, 2048 토큰)
+    ├──▶ train_biodiv_long_cls.py  → model/label_v2_long/     (KoBigBird, 2048 토큰)
+    └──▶ PostgreSQL 적재/임베딩     → biodiv_documents / biodiv_document_chunks
 ```
 
 ## 폴더 구조
@@ -34,7 +35,9 @@ budget_biodiv_cls/
 │   ├── build_biodiv_text_dataset.py # HWP/PDF 텍스트 추출
 │   ├── make_biodiv_labels.py        # Ollama LLM 라벨링
 │   ├── train_biodiv_cls.py          # RoBERTa-small 학습
-│   └── train_biodiv_long_cls.py     # KoBigBird 긴문서 학습
+│   ├── train_biodiv_long_cls.py     # KoBigBird 긴문서 학습
+│   ├── load_biodiv_csv_to_postgres.py
+│   └── embed_biodiv_chunks_to_postgres.py
 ├── data/                            # 중간/최종 데이터 (gitignore)
 ├── model/                           # 학습된 모델 (gitignore)
 ├── requirements.txt                 # 라벨링·추출용 의존성
@@ -174,6 +177,91 @@ python train_biodiv_long_cls.py
 | `--fp16` | — | AMP FP16 학습 사용 |
 | `--gradient-checkpointing` | — | GPU 메모리 절약 |
 | `--attention-type` | `block_sparse` | `block_sparse` / `original_full` |
+
+---
+
+### 5. `load_biodiv_csv_to_postgres.py` — CSV를 PostgreSQL에 적재
+
+학습 입력 CSV(`biodiv_document_text_dataset_labeled_v2.csv`)를 PostgreSQL `biofin` DB의 `biodiv_documents` 테이블에 넣습니다.
+
+```bash
+python src/load_biodiv_csv_to_postgres.py --user postgres
+```
+
+비밀번호를 터미널에 남기고 싶지 않으면 위 명령처럼 실행하면 프롬프트로 물어봅니다. 연결 문자열을 직접 줄 수도 있습니다.
+
+```bash
+python src/load_biodiv_csv_to_postgres.py --database-url postgresql://postgres:비밀번호@localhost:5432/biofin
+```
+
+주요 옵션:
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--csv` | `data/biodiv_document_text_dataset_labeled_v2.csv` | 적재할 CSV |
+| `--db-name` | `biofin` | PostgreSQL DB 이름 |
+| `--table` | `biodiv_documents` | 생성/적재할 테이블 이름 |
+| `--if-exists` | `fail` | 기존 테이블이 있을 때 `fail` / `append` / `replace` / `truncate` |
+| `--chunksize` | `1000` | 한 번에 넣을 행 수 |
+
+처음 실행할 때는 기본값 그대로 사용하면 되고, 같은 테이블을 새로 덮어쓰려면 다음처럼 실행합니다.
+
+```bash
+python src/load_biodiv_csv_to_postgres.py --user postgres --if-exists replace
+```
+
+---
+
+### 6. `embed_biodiv_chunks_to_postgres.py` — 문서 chunk와 embedding 저장
+
+`biodiv_documents.clean_document_text`를 token 기준으로 쪼개고, transformer embedding을 만들어 `biodiv_document_chunks` 테이블에 저장합니다.
+
+```bash
+python src/embed_biodiv_chunks_to_postgres.py --user postgres
+```
+
+처음 테스트할 때는 일부 문서만 처리하는 것을 권장합니다.
+
+```bash
+python src/embed_biodiv_chunks_to_postgres.py --user postgres --limit 20
+```
+
+같은 embedding 모델의 chunk를 다시 만들려면:
+
+```bash
+python src/embed_biodiv_chunks_to_postgres.py --user postgres --if-exists replace-model
+```
+
+기본 저장 방식은 별도 확장이 필요 없는 PostgreSQL `real[]` 배열입니다. pgvector 확장이 설치되어 있으면 다음처럼 vector 컬럼으로 저장할 수 있습니다.
+
+```bash
+python src/embed_biodiv_chunks_to_postgres.py --user postgres --embedding-storage pgvector --recreate-chunks-table
+```
+
+주요 옵션:
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--embedding-model` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Hugging Face embedding 모델 |
+| `--chunks-table` | `biodiv_document_chunks` | chunk/embedding 저장 테이블 |
+| `--max-tokens` | `384` | chunk 하나의 최대 토큰 수 |
+| `--overlap-tokens` | `64` | 긴 문장 분할 시 겹칠 토큰 수 |
+| `--batch-size` | `16` | embedding 배치 크기 |
+| `--limit` | `0` | 처리할 문서 수. `0`은 전체 |
+| `--device` | `auto` | `auto` / `cpu` / `cuda` |
+| `--embedding-storage` | `array` | `array` / `pgvector` |
+| `--if-exists` | `skip` | `skip` / `append` / `replace-model` / `replace-all` |
+
+pgAdmin에서 확인:
+
+```sql
+SELECT COUNT(*) FROM public.biodiv_document_chunks;
+
+SELECT document_id, chunk_index, embedding_model, embedding_dim, token_count, left(chunk_text, 120)
+FROM public.biodiv_document_chunks
+ORDER BY document_id, chunk_index
+LIMIT 20;
+```
 
 ---
 
