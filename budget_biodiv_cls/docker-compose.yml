@@ -1,0 +1,46 @@
+services:
+  biofin_db:
+    image: postgres:16
+    container_name: biofin_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: biofin
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d biofin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  biofin_binary_cls:
+    build: .
+    container_name: biofin_binary_cls
+    depends_on:
+      biofin_db:
+        condition: service_healthy
+    environment:
+      PGHOST: biofin_db
+      PGPORT: 5432
+      PGDATABASE: biofin
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - ./data:/workspace/code/data
+      - ./model:/workspace/code/model
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  postgres_data:

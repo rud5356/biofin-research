@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir -r requirements_train.txt
 
 COPY src ./src
+COPY check_db.py ./check_db.py
 
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
