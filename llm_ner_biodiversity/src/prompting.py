@@ -1,6 +1,22 @@
+"""
+LLM NER(개체명 인식)을 위한 프롬프트를 생성하는 모듈.
+
+Few-shot 프롬프팅이란?
+  LLM에게 작업 예시(예: 입력 → 출력 쌍)를 몇 가지 보여주면
+  별도 학습 없이도 같은 형식으로 답변하는 방식입니다.
+  예시가 없으면 "zero_shot", 예시가 있으면 "few_shot"이라고 합니다.
+
+이 모듈에서 정의된 규칙들:
+- SPECIES: 종명은 이명법(속명+종명) 형식 (예: Rana coreana)
+- LOCATION: 실제 지명만 (생태 용어 제외)
+- DATE: 구체적인 날짜/기간만
+"""
+
 from pathlib import Path
 
 
+# ─── 기본 지침 (LLM에게 역할과 규칙을 설명) ─────────────────────────────────
+# 영어로 작성된 이유: LLM(llama3.1:8b)이 영어 지침에 더 잘 반응하기 때문
 BASE_INSTRUCTION = """You are an expert in biodiversity literature analysis.
 Extract only the following entity types from the text:
 - SPECIES: species names, preferably scientific names
@@ -36,6 +52,8 @@ DATE rules:
 - Do NOT extract: developmental time points (e.g., "gestation day 8", "day 14") or treatment durations.
 """
 
+# ─── Few-shot 예시 (LLM이 참고할 입출력 예시들) ──────────────────────────────
+# 다양한 케이스(생물다양성 논문, 의학 논문, 약어 종명 등)를 포함합니다.
 FEW_SHOT_EXAMPLES = """
 Example 1 (biodiversity paper — extract correctly):
 Text: "Rana coreana was observed in wetlands near Suwon in April 2023."
@@ -64,13 +82,39 @@ Output: {"entities": []}
 
 
 def build_prompt(text: str, mode: str = "few_shot") -> str:
+    """
+    NER 프롬프트를 생성합니다.
+
+    Args:
+        text: 개체명을 추출할 논문 초록 텍스트
+        mode: "few_shot" (예시 포함) 또는 "zero_shot" (예시 없음)
+
+    Returns:
+        LLM에 전달할 완성된 프롬프트 문자열
+    """
     if mode == "few_shot":
+        # 기본 지침 + 예시 + 처리할 텍스트
         return f"{BASE_INSTRUCTION}\n{FEW_SHOT_EXAMPLES}\nText: {text}\nOutput:"
+    # zero_shot: 예시 없이 지침과 텍스트만 제공
     return f"{BASE_INSTRUCTION}\nText: {text}\nOutput:"
 
 
 def save_prompt_template(prompts_dir: Path, mode: str) -> Path:
+    """
+    프롬프트 템플릿을 파일로 저장합니다.
+
+    실제 텍스트 자리에는 '<TEXT>' 플레이스홀더를 사용합니다.
+    저장된 파일은 프롬프트 검토나 디버깅에 사용됩니다.
+
+    Args:
+        prompts_dir: 저장할 폴더 경로
+        mode: "few_shot" 또는 "zero_shot"
+
+    Returns:
+        저장된 파일 경로
+    """
     prompts_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = prompts_dir / f"ner_prompt_{mode}.txt"
+    # <TEXT> 자리에 실제 텍스트가 들어갈 것임을 표시
     prompt_path.write_text(build_prompt("<TEXT>", mode=mode), encoding="utf-8")
     return prompt_path
