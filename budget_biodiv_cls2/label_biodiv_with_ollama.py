@@ -23,10 +23,13 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import re
 import sys
+import threading
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -121,9 +124,12 @@ def parse_args() -> argparse.Namespace:
                         help="이 값 미만의 confidence는 review_needed.csv에 저장")
     parser.add_argument("--delay",             type=float, default=0.05,
                         help="Ollama 호출 간 대기 시간(초)")
-    parser.add_argument("--timeout",           type=int,   default=180)
-    parser.add_argument("--retries",           type=int,   default=2)
-    parser.add_argument("--retry-delay",       type=float, default=2.0)
+    parser.add_argument("--timeout",           type=int,   default=60,
+                        help="Ollama 응답 대기 최대 시간(초). CPU에서는 30~60 권장")
+    parser.add_argument("--retries",           type=int,   default=1)
+    parser.add_argument("--retry-delay",       type=float, default=1.0)
+    parser.add_argument("--workers",           type=int,   default=3,
+                        help="동시 Ollama 호출 스레드 수 (기본: 3)")
     parser.add_argument("--save-every",        type=int,   default=20,
                         help="N개 라벨링마다 캐시를 중간 저장")
     parser.add_argument("--limit-keys",        type=int,   default=0,
@@ -291,9 +297,10 @@ def parse_jsonish_response(text: str) -> dict[str, Any]:
             # JSON 없음: 텍스트에서 0/1 숫자만 추출
             label_match = re.search(r"\b([01])\b", raw)
             if not label_match:
+                # 응답은 왔지만 파싱 불가 → 보수적으로 0 처리
                 return {
-                    "label": -1, "confidence": 0.0,
-                    "reason": "응답 파싱 실패", "evidence": "",
+                    "label": 0, "confidence": 0.0,
+                    "reason": "응답 파싱 실패 후 0 fallback", "evidence": "",
                     "raw_response": text,
                 }
             return {
@@ -303,14 +310,14 @@ def parse_jsonish_response(text: str) -> dict[str, Any]:
             }
         data = json.loads(match.group(0))
 
-    # label 값 정수 변환 (0 또는 1만 허용, 아니면 -1)
-    label = data.get("label", -1)
+    # label 값 정수 변환 (0 또는 1만 허용, 아니면 보수적으로 0)
+    label = data.get("label", 0)
     try:
         label = int(label)
     except (TypeError, ValueError):
-        label = -1
+        label = 0
     if label not in {0, 1}:
-        label = -1
+        label = 0
 
     # confidence 0.0~1.0 범위로 클리핑
     try:
@@ -378,7 +385,8 @@ def classify_with_retries(
     Ollama를 호출해 분류하고, 실패하면 args.retries 회 재시도합니다.
 
     유효한 label(0 또는 1)을 받으면 즉시 반환합니다.
-    모든 시도가 실패하면 label=-1 오류 딕셔너리를 반환합니다.
+    모든 시도가 실패하면 label=0 으로 fallback합니다.
+    (타임아웃 = 생물다양성 해당 확신 없음 → 보수적으로 0 처리)
     """
     prompt      = build_prompt(row)
     last_error: Exception | None = None
@@ -400,9 +408,10 @@ def classify_with_retries(
         if attempt < args.retries:
             time.sleep(args.retry_delay)
 
+    # 모든 재시도 소진 — 확신 없으면 0으로 보수적 처리
     return {
-        "label": -1, "confidence": 0.0,
-        "reason": f"Ollama 호출 실패: {last_error}",
+        "label": 0, "confidence": 0.0,
+        "reason": f"타임아웃 후 0 fallback: {last_error}",
         "evidence": "", "raw_response": "",
     }
 
@@ -538,11 +547,12 @@ def label_unique_keys(
     """
     캐시에 없는(또는 --overwrite인) 고유 사업 조합을 Ollama로 라벨링합니다.
 
-    --limit-keys: 앞 N개만 처리 (테스트용)
-    --overwrite: 캐시가 있어도 재라벨링
+    --workers 개의 스레드가 동시에 Ollama를 호출합니다.
+    Ollama가 CPU 전용일 때는 내부적으로 순차 처리하지만,
+    타임아웃 대기 중 다른 요청을 미리 전송해 전체 대기 시간을 줄입니다.
 
+    --save-every: N개 완료마다 캐시 중간 저장 (락으로 보호)
     중단 시 KeyboardInterrupt를 잡아 캐시를 저장하고 재발생시킵니다.
-    --save-every: N개마다 캐시 중간 저장 (프로세스 종료 시 손실 최소화)
     """
     keys = list(key_map.items())
     if args.limit_keys > 0:
@@ -555,35 +565,84 @@ def label_unique_keys(
         if args.overwrite or key_hash not in cache
         or str(cache[key_hash].get("label", "")) not in {"0", "1"}
     ]
-    print(f"라벨링 대상 고유 조합: {len(pending):,}개")
+    total = len(pending)
+    print(f"라벨링 대상 고유 조합: {total:,}개  (동시 호출: {args.workers})")
     if args.limit_keys > 0:
         print(f"주의: --limit-keys {args.limit_keys} 적용 중")
 
-    try:
-        for index, (key_hash, item) in enumerate(pending, start=1):
-            result = classify_with_retries(item["row"], args)
-            cache[key_hash] = build_cache_record(key_hash, item, result, args.model)
+    # 캐시와 카운터를 여러 스레드가 공유하므로 락으로 보호
+    lock        = threading.Lock()
+    done_count  = [0]   # 리스트로 감싸서 클로저에서 수정 가능하게
 
-            label      = cache[key_hash]["label"]
-            confidence = cache[key_hash]["confidence"]
-            print(f"[{index:,}/{len(pending):,}] {label} conf={confidence} {item['input_text'][:100]}")
+    def process_one(key_hash: str, item: dict[str, Any]) -> None:
+        """단일 항목을 분류하고 캐시에 저장합니다 (스레드 1개가 실행)."""
+        result = classify_with_retries(item["row"], args)
+        record = build_cache_record(key_hash, item, result, args.model)
 
-            # N개마다 중간 저장
-            if args.save_every > 0 and index % args.save_every == 0:
+        with lock:
+            cache[key_hash] = record
+            done_count[0] += 1
+            idx        = done_count[0]
+            label      = record["label"]
+            confidence = record["confidence"]
+            print(f"[{idx:,}/{total:,}] {label} conf={confidence} {item['input_text'][:80]}")
+
+            # N개마다 캐시 중간 저장 (락 안에서 수행해 파일 충돌 방지)
+            if args.save_every > 0 and idx % args.save_every == 0:
                 save_cache(args.cache_csv, cache)
-            if args.delay > 0:
-                time.sleep(args.delay)
-    except (Exception, KeyboardInterrupt) as exc:
-        # 중단 시 현재까지의 캐시를 저장하고 재실행 방법 안내
-        print(f"\nWARN: 실행 중단; 캐시 저장 중: {args.cache_csv}", file=sys.stderr)
+
+    # Ctrl+C 신호를 받으면 True로 설정 — 스레드들이 이 플래그를 확인해 조기 종료
+    stop_flag = threading.Event()
+
+    def process_one_guarded(key_hash: str, item: dict[str, Any]) -> None:
+        """stop_flag가 설정되면 즉시 반환합니다."""
+        if stop_flag.is_set():
+            return
+        process_one(key_hash, item)
+
+    executor = ThreadPoolExecutor(max_workers=args.workers)
+    futures = {
+        executor.submit(process_one_guarded, key_hash, item): key_hash
+        for key_hash, item in pending
+    }
+
+    try:
+        for future in as_completed(futures):
+            future.result()
+
+    except KeyboardInterrupt:
+        print(f"\nWARN: Ctrl+C 감지 — 현재 실행 중인 요청 완료 후 종료합니다...", file=sys.stderr)
+        stop_flag.set()
+        # 대기 중인 미실행 future 취소
+        for f in futures:
+            f.cancel()
+        # 실행 중인 스레드가 끝날 때까지 대기 (timeout 이내로 종료됨)
+        executor.shutdown(wait=True, cancel_futures=True)
+        print(f"WARN: 캐시 저장 중: {args.cache_csv}", file=sys.stderr)
         try:
-            save_cache(args.cache_csv, cache)
-            print("WARN: 캐시 저장 완료. --overwrite 없이 재실행하면 이어서 시작합니다.", file=sys.stderr)
+            with lock:
+                save_cache(args.cache_csv, cache)
+            print("WARN: 캐시 저장 완료. 재실행하면 이어서 시작합니다.", file=sys.stderr)
         except Exception as save_exc:
-            print(f"ERROR: 중단 후 캐시 저장 실패: {save_exc}", file=sys.stderr)
+            print(f"ERROR: 캐시 저장 실패: {save_exc}", file=sys.stderr)
+        # os._exit로 스레드 블로킹 없이 즉시 종료
+        os._exit(0)
+
+    except Exception as exc:
+        stop_flag.set()
+        executor.shutdown(wait=False, cancel_futures=True)
+        print(f"\nWARN: 오류 발생; 캐시 저장 중: {args.cache_csv}", file=sys.stderr)
+        try:
+            with lock:
+                save_cache(args.cache_csv, cache)
+        except Exception as save_exc:
+            print(f"ERROR: 캐시 저장 실패: {save_exc}", file=sys.stderr)
         raise exc
+
     else:
+        executor.shutdown(wait=True)
         save_cache(args.cache_csv, cache)
+
     return cache
 
 
