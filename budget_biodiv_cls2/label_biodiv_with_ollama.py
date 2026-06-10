@@ -38,7 +38,7 @@ from urllib.error import URLError
 
 
 # ─── 기본 설정값 ─────────────────────────────────────────────────────────────
-DEFAULT_MODEL       = "llama3.1:8b"
+DEFAULT_MODEL       = "gemma3:12b"
 DEFAULT_OLLAMA_URL  = "http://localhost:11434"
 DEFAULT_INPUT_GLOB  = "세부사업 예산편성현황(총액)_*.csv"
 DEFAULT_LABEL_COLUMN = "biodiv_label"
@@ -67,9 +67,9 @@ OUTPUT_COLUMNS = (
 )
 
 
-# LLM에게 보내는 분류 프롬프트 템플릿
+# system 메시지: 판단 기준 전체
 # temperature=0, top_p=0.1로 재현성 높은 결과를 얻습니다.
-PROMPT_TEMPLATE = """\
+SYSTEM_PROMPT = """\
 너는 대한민국 재정사업이 생물다양성(Biodiversity)과 실질적으로 관련되는지 판단하는 BIOFIN 전문 분류자이다.
 
 목적은 사업이 생물다양성 보전, 지속가능한 이용, 생태계 복원, 생태계 관리, 생물자원 관리, 생태계서비스 유지 등을 주목적 또는 주요 활동으로 포함하는지를 식별하는 것이다.
@@ -513,19 +513,6 @@ STEP 5. 최종 판단
   - reason을 먼저 구체적으로 서술하고, 그 논리에 따라 label을 확정한다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[입력 사업 정보]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-소관명: {소관명}
-회계코드명: {회계코드명}
-계정명: {계정명}
-분야명: {분야명}
-부문명: {부문명}
-프로그램명: {프로그램명}
-단위사업명: {단위사업명}
-세부사업명: {세부사업명}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [출력 형식]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -553,6 +540,20 @@ evidence 작성 규칙:
   "reason": "판단 근거 (최소 3문장, 구체적이고 추적 가능하게)",
   "evidence": "사업명에 실제로 등장하는 단어 또는 어구, 없으면 null"
 }}
+"""
+
+# 사업 데이터만 담는 user 메시지 템플릿
+PROMPT_TEMPLATE = """\
+아래 사업을 판단하라.
+
+소관명: {소관명}
+회계코드명: {회계코드명}
+계정명: {계정명}
+분야명: {분야명}
+부문명: {부문명}
+프로그램명: {프로그램명}
+단위사업명: {단위사업명}
+세부사업명: {세부사업명}
 """
 
 
@@ -796,22 +797,25 @@ def call_ollama(
     use_json_format: bool,
 ) -> str:
     """
-    Ollama REST API를 호출해 LLM 응답을 반환합니다.
+    Ollama Chat API를 호출해 LLM 응답을 반환합니다.
 
     stream=False: 전체 응답을 한 번에 받습니다 (스트리밍 비활성화).
     temperature=0: 항상 같은 결과를 출력 (재현성 확보).
     top_p=0.1: 상위 10% 확률의 토큰만 사용 (보수적 응답).
-    num_ctx=4096: 컨텍스트 창 크기 (프롬프트가 이 크기를 초과하면 잘림).
+    num_ctx=8192: 컨텍스트 창 크기 (시스템 프롬프트가 크므로 4096 → 8192).
     format=json: JSON 형식 출력 강제 (--no-json-format으로 끌 수 있음).
     """
     payload: dict[str, Any] = {
-        "model":  model,
-        "prompt": prompt,
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": prompt},
+        ],
         "stream": False,
         "options": {
             "temperature": 0,
             "top_p":       0.1,
-            "num_ctx":     4096,
+            "num_ctx":     8192,
         },
     }
     if use_json_format:
@@ -819,7 +823,7 @@ def call_ollama(
 
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req  = request.Request(
-        f"{ollama_url.rstrip('/')}/api/generate",
+        f"{ollama_url.rstrip('/')}/api/chat",
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -827,7 +831,7 @@ def call_ollama(
 
     with request.urlopen(req, timeout=timeout) as response:
         body = json.loads(response.read().decode("utf-8"))
-    return str(body.get("response", ""))
+    return str(body.get("message", {}).get("content", ""))
 
 
 def classify_with_retries(
