@@ -99,6 +99,8 @@ SYSTEM_PROMPT = """\
 - 일반 행정·복지·의료·교육(자연환경·생물종과 무관한 내용)
 - 일반 건축·도로·교통·단순 에너지사업
 - 부처·기관 운영을 위한 정보화·보안·장비 구축(생태계 정보와 무관한 경우)
+- 기상·기후 데이터 관리·서비스·인프라 구축 — 기후변화 대응을 내세우더라도
+  생물다양성 정보를 직접 다루거나 생태계 보전을 명시하지 않는 경우
 - 해양·산림·농업 부처 소관이라는 이유만으로 생물다양성 관련으로 보지 않는다
 
 ▶ 반드시 지켜야 할 판단 규칙
@@ -117,8 +119,15 @@ SYSTEM_PROMPT = """\
    예) "국방 작전훈련(습지 지역)" → '습지' 언급하나 보전 목적 아님 → 0
 
 ④ 애매한 경우의 기본값은 0이다. 생물다양성과의 연관이 사업명에서 명확히
-   읽히지 않으면 0으로 판단하고, confidence를 0.40~0.55 수준으로 부여한다.
-   (v3의 "애매하면 1" 정책을 폐기한다)
+   읽히지 않으면 0으로 판단한다.
+
+⑤ 사업의 주목적이 생물다양성이어야 한다.
+   생물다양성에 부수적·간접적으로 기여할 수 있는 사업이더라도,
+   사업명에서 그 연관이 직접 읽히지 않으면 1을 부여하지 않는다.
+   예) "기후자료 관리·서비스체계 구축" → 기후변화가 생태계에 영향을 주더라도
+       이 사업 자체가 생물다양성을 목적으로 하지 않으므로 → 0
+   예) "재생에너지 인프라 구축" → 화석연료 감소가 간접적으로 생태계에 이롭더라도
+       생물다양성 목적이 사업명에 없으므로 → 0
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [판단 우선순위]
@@ -208,7 +217,8 @@ SYSTEM_PROMPT = """\
 * 시민참여 생태조사
 * 생태계서비스 가치평가
 
-※ 일반 정보화·DB 구축은 생물다양성 정보를 다루는 경우에만 해당
+※ 일반 정보화·DB 구축은 생물다양성 정보를 직접 다루는 경우에만 해당
+※ 기상·기후·대기 데이터 관리 시스템은 생물다양성 정보가 아니므로 해당하지 않음
 
 ⑦ 녹색경제
 
@@ -533,6 +543,13 @@ evidence 작성 규칙:
 - 복수일 경우 쉼표로 구분하여 나열한다.
 - 해당 근거가 없으면 null로 기재한다.
 
+confidence 작성 규칙 (캘리브레이션 기준):
+- 명백히 비관련 (기본경비·일반도로·IT·건설 등):     0.85~0.95로 0
+- 비관련이나 판단 근거 서술이 필요한 경우:          0.60~0.80으로 0
+- 경계선상 (애매하여 0으로 판단):                   0.40~0.55로 0
+- 관련 확실 (사업명에 생태계·보전 등 직접 명시):    0.85~0.95로 1
+- 관련이나 일부 내용 불명확:                        0.65~0.80으로 1
+
 {{
   "label": 0 또는 1,
   "biofin_category": "해당 BIOFIN 범주 번호 및 명칭 (예: ② 생태계 복원), 해당 없으면 null",
@@ -582,8 +599,8 @@ def parse_args() -> argparse.Namespace:
                         help="Ollama 응답 대기 최대 시간(초). CPU에서는 30~60 권장")
     parser.add_argument("--retries",           type=int,   default=1)
     parser.add_argument("--retry-delay",       type=float, default=1.0)
-    parser.add_argument("--workers",           type=int,   default=3,
-                        help="동시 Ollama 호출 스레드 수 (기본: 3)")
+    parser.add_argument("--workers",           type=int,   default=1,
+                        help="동시 Ollama 호출 스레드 수 (기본: 1)")
     parser.add_argument("--save-every",        type=int,   default=20,
                         help="N개 라벨링마다 캐시를 중간 저장")
     parser.add_argument("--limit-keys",        type=int,   default=0,
@@ -797,25 +814,23 @@ def call_ollama(
     use_json_format: bool,
 ) -> str:
     """
-    Ollama Chat API를 호출해 LLM 응답을 반환합니다.
+    Ollama Generate API(/api/generate)를 호출해 LLM 응답을 반환합니다.
 
     stream=False: 전체 응답을 한 번에 받습니다 (스트리밍 비활성화).
     temperature=0: 항상 같은 결과를 출력 (재현성 확보).
     top_p=0.1: 상위 10% 확률의 토큰만 사용 (보수적 응답).
-    num_ctx=8192: 컨텍스트 창 크기 (시스템 프롬프트가 크므로 4096 → 8192).
+    num_ctx=4096: 컨텍스트 창 크기.
     format=json: JSON 형식 출력 강제 (--no-json-format으로 끌 수 있음).
     """
+    full_prompt = SYSTEM_PROMPT + "\n" + prompt
     payload: dict[str, Any] = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": prompt},
-        ],
+        "model":  model,
+        "prompt": full_prompt,
         "stream": False,
         "options": {
             "temperature": 0,
             "top_p":       0.1,
-            "num_ctx":     8192,
+            "num_ctx":     4096,
         },
     }
     if use_json_format:
@@ -823,7 +838,7 @@ def call_ollama(
 
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req  = request.Request(
-        f"{ollama_url.rstrip('/')}/api/chat",
+        f"{ollama_url.rstrip('/')}/api/generate",
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -831,7 +846,7 @@ def call_ollama(
 
     with request.urlopen(req, timeout=timeout) as response:
         body = json.loads(response.read().decode("utf-8"))
-    return str(body.get("message", {}).get("content", ""))
+    return str(body.get("response", ""))
 
 
 def classify_with_retries(
