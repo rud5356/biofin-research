@@ -211,12 +211,19 @@ def main() -> None:
             done[r["key_hash"]] = r
         print(f"cache_7 기존 항목: {len(done)}건 (재개)")
 
-    # ── 3. 재분류 대상 추출 (gemma3:12b로 이미 처리된 것은 건너뜀) ─────────
-    todo = [
-        r for r in positives
-        if r["key_hash"] not in done
-        or not str(done[r["key_hash"]].get("model", "")).startswith("gemma3")
-    ]
+    # ── 3. 재분류 대상 추출 (gemma3:12b 성공 완료된 것만 건너뜀, timeout은 재처리) ─
+    def is_done(key_hash: str) -> bool:
+        r = done.get(key_hash, {})
+        m = str(r.get("model", ""))
+        conf = r.get("confidence", "")
+        try:
+            conf_val = float(conf)
+        except (ValueError, TypeError):
+            conf_val = 0.0
+        # 모델명 일치 + confidence > 0 인 경우만 완료로 간주 (timeout은 confidence=0)
+        return m == args.model and conf_val > 0.0
+
+    todo = [r for r in positives if not is_done(r["key_hash"])]
     print(f"재분류 대상: {len(todo)}건 (이미 완료: {len(positives) - len(todo)}건)\n")
 
     # ── 4. 병렬 재분류 ────────────────────────────────────────────────────
