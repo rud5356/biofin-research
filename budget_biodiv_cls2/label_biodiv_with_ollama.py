@@ -861,6 +861,7 @@ def classify_with_retries(
         try:
             raw_response = call_ollama(
                 prompt=prompt, model=args.model,
+                
                 ollama_url=args.ollama_url, timeout=args.timeout,
                 use_json_format=not args.no_json_format,
             )
