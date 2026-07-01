@@ -22,7 +22,7 @@ from datetime import datetime
 from email.message import Message
 from pathlib import Path
 from typing import Any, Iterable, Iterator
-from urllib.parse import unquote, urlencode, urljoin, urlparse
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 
 import pandas as pd
 
@@ -53,7 +53,10 @@ except ImportError:  # main에서 친절한 설치 안내를 출력하기 위한
 BASE_DIR = Path(r"C:\repos\biofin-research\budget_biodiv_cls2\outputs")
 SAVE_DIR = BASE_DIR / "사업설명자료"
 SITE_URL = "https://www.openfiscaldata.go.kr/op/ko/bs/UOPKOBSA02"
-ALLOWED_EXTENSIONS = {".hwp", ".pdf", ".zip", ".xlsx"}
+LIST_API_URL = "https://www.openfiscaldata.go.kr/op/ko/bs/cls/selectSactvSearchList.do"
+DETAIL_URL = "https://www.openfiscaldata.go.kr/op/ko/bs/cls/UOPKOBSZ01"
+DOWNLOAD_BASE_URL = "https://www.openfiscaldata.go.kr/op/ko/cm/downloadFileSayBrkd.do"
+ALLOWED_EXTENSIONS = {".hwp", ".hwpx", ".pdf", ".zip", ".xlsx"}
 
 SUCCESS_COLUMNS = [
     "year",
@@ -140,6 +143,7 @@ class RuntimeConfig:
 
     timeout_ms: int = 30_000
     dry_run: bool = False
+    multi_only: bool = False
     min_delay: float = 1.0
     max_delay: float = 2.0
 
@@ -442,19 +446,22 @@ def _iter_dicts(payload: Any) -> Iterator[dict[str, Any]]:
 def _candidate_from_record(
     record: dict[str, Any], response_url: str, expected_year: int
 ) -> dict[str, Any] | None:
-    activity = _dict_value(record, COLUMN_CANDIDATES["activity_name"])
+    # 열린재정 목록에서 actvNm은 '단위사업명', sayNm이 실제 '세부사업명'이다.
+    activity = _dict_value(record, ["sayNm", "세부사업명", "activityName"])
     if not activity:
         return None
     record_year = _parse_year(_dict_value(record, COLUMN_CANDIDATES["year"]))
     if record_year and record_year != expected_year:
         return None
 
-    href = _dict_value(
-        record,
-        ["detailUrl", "detail_url", "fileUrl", "downloadUrl", "href", "url", "link"],
-    )
-    if href and not href.lower().startswith(("http://", "https://", "/")):
-        href = ""
+    detail_params = {
+        key: value
+        for key, value in record.items()
+        if value is not None
+        and not isinstance(value, bool)
+        and isinstance(value, (str, int, float))
+    }
+    href = f"{DETAIL_URL}?{urlencode(detail_params)}"
 
     id_parts = []
     for key, value in record.items():
@@ -466,6 +473,16 @@ def _candidate_from_record(
         ):
             id_parts.append(f"{key}={value}")
 
+    file_name = _dict_value(record, ["sayBrkdFileNm", "fileName"])
+    file_stem = Path(file_name).stem if file_name else ""
+    display_name = f"{_dict_value(record, COLUMN_CANDIDATES['ministry'])}_{activity}"
+    download_url = (
+        f"{DOWNLOAD_BASE_URL}/{quote(str(expected_year), safe='')}"
+        f"/{quote(display_name, safe='')}/{quote(file_stem, safe='')}"
+        if file_stem
+        else ""
+    )
+
     return {
         "activity": activity,
         "ministry": _dict_value(record, COLUMN_CANDIDATES["ministry"]),
@@ -473,14 +490,105 @@ def _candidate_from_record(
         "field": _dict_value(record, COLUMN_CANDIDATES["field_name"]),
         "sector": _dict_value(record, COLUMN_CANDIDATES["sector_name"]),
         "program": _dict_value(record, COLUMN_CANDIDATES["program_name"]),
-        "unit": _dict_value(record, COLUMN_CANDIDATES["unit_name"]),
-        "href": urljoin(SITE_URL, href) if href else "",
+        "unit": _dict_value(record, ["actvNm", "단위사업명", "unitName"]),
+        "href": href,
+        "file_name": file_name,
+        "download_url": download_url,
         "source_url": response_url,
         "record_id": "|".join(sorted(id_parts)),
         "raw_text": json.dumps(record, ensure_ascii=False, default=str)[:4000],
         "origin": "network",
         "row_index": None,
+        "record": record,
     }
+
+
+async def _fetch_year_candidates(
+    page: Page, year: int, activity_names: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """실제 JSON API를 조회하며, 소량 테스트는 사업명 검색으로 응답량을 줄인다."""
+
+    candidates: list[dict[str, Any]] = []
+    # --limit 등으로 대상이 20건 이하면 사업명별 소량 조회가 훨씬 빠르고 안정적이다.
+    queries = list(dict.fromkeys(activity_names or [])) if activity_names else [""]
+    if len(queries) > 20:
+        queries = [""]
+
+    for activity_query in queries:
+        page_index = 1
+        total_count: int | None = None
+        while True:
+            LOGGER.info(
+                "%s년 목록 API 조회 중(page=%d, pageSize=5000, 사업명=%s)",
+                year,
+                page_index,
+                activity_query or "전체",
+            )
+            payload = {
+                "opKoBsClsSerDVO": {
+                    "pageIndex": page_index,
+                    "pageSize": "5000",
+                    "totalCnt": total_count or "0",
+                    "acntYr": str(year),
+                    "offcCd": "",
+                    "acntCd": "",
+                    "fldCd": "",
+                    "sectCd": "",
+                    "sayNm": activity_query,
+                    "chkoffcNm": "Y",
+                    "chkacntNm": "Y",
+                    "chkfldNm": "Y",
+                    "chksectNm": "Y",
+                    "chkpgmNm": "Y",
+                    "chkactvNm": "Y",
+                }
+            }
+            response = await asyncio.wait_for(
+                page.request.post(
+                    LIST_API_URL,
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=RUNTIME.timeout_ms,
+                ),
+                timeout=RUNTIME.timeout_ms / 1000 + 2,
+            )
+            if not response.ok:
+                raise RuntimeError(
+                    f"목록 API HTTP {response.status} {response.status_text}"
+                )
+            data = await asyncio.wait_for(
+                response.json(), timeout=RUNTIME.timeout_ms / 1000 + 2
+            )
+            records = data.get("opKoBsClsSerDVOList") or []
+            if not isinstance(records, list):
+                raise RuntimeError("목록 API 응답 형식 변경(opKoBsClsSerDVOList 없음)")
+            if records and total_count is None:
+                total_count = int(
+                    records[0].get("pageTotCnt")
+                    or records[0].get("totalCnt")
+                    or len(records)
+                )
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                candidate = _candidate_from_record(record, LIST_API_URL, year)
+                if candidate:
+                    candidate["listing_url"] = _year_url(year, page_index)
+                    candidates.append(candidate)
+            LOGGER.info(
+                "%s년 목록 API page %d 완료: %d건(누적 후보 %d건, 총 %s건)",
+                year,
+                page_index,
+                len(records),
+                len(candidates),
+                total_count if total_count is not None else "미상",
+            )
+            if not records or total_count is None or page_index * 5000 >= total_count:
+                break
+            page_index += 1
+            if page_index > 20:
+                raise RuntimeError("목록 API 페이지가 20회를 초과하여 중단")
+    return _deduplicate_candidates(candidates)
 
 
 async def _consume_json_response(
@@ -761,6 +869,8 @@ def _extension_from_content_type(content_type: str) -> str:
         "application/haansofthwp": ".hwp",
         "application/x-hwp": ".hwp",
         "application/vnd.hancom.hwp": ".hwp",
+        "application/vnd.hancom.hwpx": ".hwpx",
+        "application/x-hwpx": ".hwpx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
     }.get(lowered, "")
 
@@ -826,6 +936,7 @@ async def _download_url(
     target: dict[str, Any],
     save_dir: Path,
     name_hint: str = "",
+    prefer_name_hint: bool = False,
 ) -> tuple[Path | None, str]:
     """동일 브라우저 세션의 쿠키를 쓰는 Playwright request로 정적 링크를 받는다."""
 
@@ -834,8 +945,17 @@ async def _download_url(
         if not response.ok:
             return None, f"HTTP {response.status} {response.status_text}"
         headers = response.headers
+        content_type = headers.get("content-type", "").lower()
+        disposition = headers.get("content-disposition", "").lower()
+        if (
+            ("text/html" in content_type or "application/json" in content_type)
+            and "attachment" not in disposition
+            and "filename" not in disposition
+        ):
+            return None, f"파일 대신 오류 응답 수신({content_type})"
         original_name = (
-            _filename_from_disposition(headers.get("content-disposition", ""))
+            (name_hint if prefer_name_hint else "")
+            or _filename_from_disposition(headers.get("content-disposition", ""))
             or _filename_from_url(url)
             or name_hint
             or "사업설명자료"
@@ -856,6 +976,126 @@ async def _download_url(
         return destination, "다운로드 완료"
     except Exception as exc:
         return None, f"URL 다운로드 실패: {type(exc).__name__}: {exc}"
+
+
+async def _save_response_download(
+    response: Any,
+    target: dict[str, Any],
+    save_dir: Path,
+    name_hint: str = "",
+) -> tuple[Path | None, str]:
+    """숨은 form/iframe 다운로드 응답의 본문을 파일로 저장한다."""
+
+    try:
+        headers = response.headers
+        content_type = headers.get("content-type", "")
+        original_name = (
+            _filename_from_disposition(headers.get("content-disposition", ""))
+            or _filename_from_url(response.url)
+            or _clean_value(target.get("_candidate", {}).get("file_name"))
+            or name_hint
+            or "사업설명자료"
+        )
+        extension = Path(original_name).suffix.lower()
+        if extension not in ALLOWED_EXTENSIONS:
+            extension = _extension_from_content_type(content_type)
+            if extension:
+                original_name = f"{Path(original_name).stem or '사업설명자료'}{extension}"
+        if Path(original_name).suffix.lower() not in ALLOWED_EXTENSIONS:
+            return None, f"다운로드 응답 형식 판별 실패({content_type})"
+        destination = _destination_path(save_dir, target, original_name)
+        if destination.exists():
+            return destination, "이미 존재하여 건너뜀"
+        destination.write_bytes(await response.body())
+        return destination, "다운로드 완료"
+    except Exception as exc:
+        return None, f"응답 저장 실패: {type(exc).__name__}: {exc}"
+
+
+async def _click_dynamic_download(
+    page: Page,
+    locator: Locator,
+    target: dict[str, Any],
+    save_dir: Path,
+    name_hint: str,
+) -> tuple[list[Path], str]:
+    """다운로드 이벤트뿐 아니라 숨은 iframe 응답과 새 탭도 함께 감시한다."""
+
+    downloads: list[Download] = []
+    responses: list[Any] = []
+    before_pages = set(page.context.pages)
+    before_frames = {frame.url for frame in page.frames}
+
+    def on_download(download: Download) -> None:
+        downloads.append(download)
+
+    def on_response(response: Any) -> None:
+        headers = response.headers
+        disposition = headers.get("content-disposition", "").lower()
+        content_type = headers.get("content-type", "")
+        url_extension = Path(urlparse(response.url).path).suffix.lower()
+        if (
+            "attachment" in disposition
+            or "filename" in disposition
+            or url_extension in ALLOWED_EXTENSIONS
+            or _extension_from_content_type(content_type) in ALLOWED_EXTENSIONS
+        ):
+            responses.append(response)
+
+    page.on("download", on_download)
+    page.on("response", on_response)
+    try:
+        await locator.click(timeout=RUNTIME.timeout_ms)
+        # 사이트 함수가 숨은 form을 만든 뒤 응답할 시간을 주되 사업마다 30초를 낭비하지 않는다.
+        wait_ms = min(RUNTIME.timeout_ms, 12_000)
+        elapsed = 0
+        while elapsed < wait_ms and not downloads and not responses:
+            await page.wait_for_timeout(250)
+            elapsed += 250
+    finally:
+        page.remove_listener("download", on_download)
+        page.remove_listener("response", on_response)
+
+    saved: list[Path] = []
+    errors: list[str] = []
+    for download in downloads:
+        try:
+            path = await _save_playwright_download(download, target, save_dir)
+            if path not in saved:
+                saved.append(path)
+        except Exception as exc:
+            errors.append(f"download 이벤트 저장 실패: {type(exc).__name__}: {exc}")
+    for response in responses:
+        path, reason = await _save_response_download(
+            response, target, save_dir, name_hint=name_hint
+        )
+        if path and path not in saved:
+            saved.append(path)
+        elif not path:
+            errors.append(reason)
+
+    # 파일이 새 탭/iframe에서 inline으로 열린 경우 동일 세션 request로 다시 받는다.
+    if not saved:
+        candidate_urls = [
+            opened.url
+            for opened in page.context.pages
+            if opened not in before_pages and opened.url not in {"", "about:blank"}
+        ]
+        candidate_urls.extend(
+            frame.url
+            for frame in page.frames
+            if frame.url not in before_frames and frame.url not in {"", "about:blank"}
+        )
+        for url in dict.fromkeys(candidate_urls):
+            path, reason = await _download_url(page, url, target, save_dir, name_hint)
+            if path:
+                saved.append(path)
+            else:
+                errors.append(f"{url}: {reason}")
+
+    if not saved and not errors:
+        errors.append("다운로드 이벤트/파일 응답/새 탭이 모두 발생하지 않음")
+    return saved, "; ".join(errors)
 
 
 async def _find_clickable_in_row(row: Locator, activity_name: str) -> Locator | None:
@@ -934,7 +1174,14 @@ async def _open_candidate(
             if path:
                 return page, [path]
             raise RuntimeError(reason)
-        await page.goto(href, wait_until="domcontentloaded", timeout=RUNTIME.timeout_ms)
+        await asyncio.wait_for(
+            page.goto(
+                href,
+                wait_until="domcontentloaded",
+                timeout=RUNTIME.timeout_ms,
+            ),
+            timeout=RUNTIME.timeout_ms / 1000 + 2,
+        )
         try:
             await page.wait_for_load_state("networkidle", timeout=min(RUNTIME.timeout_ms, 10_000))
         except PlaywrightTimeoutError:
@@ -942,7 +1189,14 @@ async def _open_candidate(
         return page, []
 
     search_url = target["_search_url"]
-    await page.goto(search_url, wait_until="domcontentloaded", timeout=RUNTIME.timeout_ms)
+    await asyncio.wait_for(
+        page.goto(
+            search_url,
+            wait_until="domcontentloaded",
+            timeout=RUNTIME.timeout_ms,
+        ),
+        timeout=RUNTIME.timeout_ms / 1000 + 2,
+    )
     try:
         await page.wait_for_selector(ROW_SELECTOR, timeout=RUNTIME.timeout_ms)
     except PlaywrightTimeoutError:
@@ -1032,6 +1286,31 @@ async def download_business_doc(page: Page, target: dict, save_dir: Path) -> dic
     errors: list[str] = []
 
     try:
+        # 사이트 공통 JS가 호출하는 실제 파일 API를 우선 사용한다.
+        direct_url = _clean_value(candidate.get("download_url"))
+        if direct_url:
+            path, reason = await _download_url(
+                page,
+                direct_url,
+                target,
+                save_dir,
+                name_hint=_clean_value(candidate.get("file_name")),
+                prefer_name_hint=True,
+            )
+            if path:
+                return {
+                    "ok": True,
+                    "reason": "",
+                    "files": [path],
+                    "source_url": direct_url,
+                }
+            return {
+                "ok": False,
+                "reason": f"직접 파일 API 다운로드 실패: {reason}",
+                "files": [],
+                "source_url": direct_url,
+            }
+
         original_pages = set(page.context.pages)
         detail_page, direct_downloads = await _open_candidate(page, target, candidate)
         opened_new_page = detail_page is not page and detail_page not in original_pages
@@ -1066,15 +1345,18 @@ async def download_business_doc(page: Page, target: dict, save_dir: Path) -> dic
                     continue
 
                 try:
-                    async with detail_page.expect_download(
-                        timeout=RUNTIME.timeout_ms
-                    ) as download_info:
-                        await locator.click(timeout=RUNTIME.timeout_ms)
-                    path = await _save_playwright_download(
-                        await download_info.value, target, save_dir
+                    paths, reason = await _click_dynamic_download(
+                        detail_page,
+                        locator,
+                        target,
+                        save_dir,
+                        text or _clean_value(candidate.get("file_name")),
                     )
-                    if path not in downloaded:
-                        downloaded.append(path)
+                    for path in paths:
+                        if path not in downloaded:
+                            downloaded.append(path)
+                    if reason:
+                        errors.append(f"{text or '동적 버튼'}: {reason}")
                 except Exception as exc:
                     errors.append(f"{text or '동적 버튼'}: {type(exc).__name__}: {exc}")
 
@@ -1091,7 +1373,7 @@ async def download_business_doc(page: Page, target: dict, save_dir: Path) -> dic
             "files": [],
             "source_url": detail_page.url,
         }
-    except PlaywrightTimeoutError as exc:
+    except (PlaywrightTimeoutError, asyncio.TimeoutError) as exc:
         await _save_debug_html(
             detail_page, save_dir, f"{target['year']}_{target['activity_name']}_timeout"
         )
@@ -1124,74 +1406,19 @@ async def crawl_one_year(
     success_rows: list[dict[str, Any]] = []
     failed_rows: list[dict[str, Any]] = []
     search_url = _year_url(year)
-    network_candidates: list[dict[str, Any]] = []
-    response_tasks: set[asyncio.Task[Any]] = set()
-
-    def on_response(response: Any) -> None:
-        if response.request.resource_type not in {"xhr", "fetch"}:
-            return
-        task = asyncio.create_task(
-            _consume_json_response(response, year, network_candidates)
-        )
-        response_tasks.add(task)
-        task.add_done_callback(response_tasks.discard)
-
-    page.on("response", on_response)
-    all_dom_candidates: list[dict[str, Any]] = []
     try:
-        # 한 연도의 원자료가 5,000건을 넘을 수 있으므로 총 건수에 따라 다음 페이지도 읽는다.
-        page_index = 1
-        total_pages: int | None = None
-        while page_index <= (total_pages or 20):
-            current_url = _year_url(year, page_index)
-            network_start = len(network_candidates)
-            await page.goto(
-                current_url, wait_until="domcontentloaded", timeout=RUNTIME.timeout_ms
+        query_names = (
+            None
+            if RUNTIME.multi_only
+            else (
+                targets["activity_name"].dropna().astype(str).drop_duplicates().tolist()
+                if len(targets) <= 20
+                else None
             )
-            try:
-                await page.wait_for_load_state(
-                    "networkidle", timeout=min(RUNTIME.timeout_ms, 15_000)
-                )
-            except PlaywrightTimeoutError:
-                pass
-            try:
-                await page.wait_for_selector(ROW_SELECTOR, timeout=RUNTIME.timeout_ms)
-            except PlaywrightTimeoutError:
-                pass
-            await page.wait_for_timeout(1000)
-            if response_tasks:
-                await asyncio.gather(*list(response_tasks), return_exceptions=True)
-
-            current_dom = await _extract_dom_candidates(page)
-            for candidate in current_dom:
-                candidate["listing_url"] = current_url
-            all_dom_candidates.extend(current_dom)
-            for candidate in network_candidates[network_start:]:
-                candidate["listing_url"] = current_url
-
-            try:
-                body_text = _clean_value(await page.locator("body").inner_text())
-            except PlaywrightError:
-                body_text = ""
-            total_match = re.search(r"총\s*([\d,]+)\s*건", body_text)
-            if total_match:
-                total_count = int(total_match.group(1).replace(",", ""))
-                total_pages = max(1, (total_count + 4999) // 5000)
-
-            current_network = _deduplicate_candidates(
-                network_candidates[network_start:]
-            )
-            page_record_count = len(current_network) or len(current_dom)
-            if total_pages is not None and page_index >= total_pages:
-                break
-            if total_pages is None and page_record_count < 5000:
-                break
-            page_index += 1
-    except PlaywrightTimeoutError as exc:
-        debug_path = await _save_debug_html(page, save_dir, f"{year}_year_page_timeout")
-        reason = f"연도 페이지 timeout({RUNTIME.timeout_ms}ms): {exc}"
-        if debug_path:
-            reason += f" (debug: {debug_path.name})"
+        )
+        candidates = await _fetch_year_candidates(page, year, query_names)
+    except (PlaywrightTimeoutError, asyncio.TimeoutError) as exc:
+        reason = f"연도 목록 API timeout({RUNTIME.timeout_ms}ms): {exc}"
         for target in targets.to_dict("records"):
             failed_rows.append(
                 _failed_row(
@@ -1205,7 +1432,7 @@ async def crawl_one_year(
             )
         return success_rows, failed_rows
     except Exception as exc:
-        reason = f"연도 페이지 접근 실패: {type(exc).__name__}: {exc}"
+        reason = f"연도 목록 API 접근 실패: {type(exc).__name__}: {exc}"
         for target in targets.to_dict("records"):
             failed_rows.append(
                 _failed_row(
@@ -1218,16 +1445,9 @@ async def crawl_one_year(
                 )
             )
         return success_rows, failed_rows
-    finally:
-        page.remove_listener("response", on_response)
 
-    candidates = _merge_dom_hints(network_candidates, all_dom_candidates)
     if not candidates:
-        body_text = _clean_value(await page.locator("body").inner_text())
-        reason = "검색 결과 없음" if re.search(r"총\s*0\s*건", body_text) else "검색 결과 목록 셀렉터 탐색 실패"
-        debug_path = await _save_debug_html(page, save_dir, f"{year}_result_structure_missing")
-        if debug_path:
-            reason += f" (debug: {debug_path.name})"
+        reason = "검색 결과 없음(목록 API 0건)"
         for target in targets.to_dict("records"):
             failed_rows.append(
                 _failed_row(
@@ -1273,43 +1493,11 @@ async def crawl_one_year(
                 )
                 continue
 
-            if len(matched) > 1:
-                # 요구사항대로 후보를 하나 임의 선택하지 않고, 후보별 행을 모두 기록한다.
-                for index, candidate in enumerate(matched, start=1):
-                    failed_rows.append(
-                        _failed_row(
-                            year=year,
-                            source_file=target["source_file"],
-                            ministry=target["ministry"],
-                            activity_name=target["activity_name"],
-                            reason=_candidate_summary(candidate, index, len(matched)),
-                            searched_url=search_url,
-                        )
-                    )
+            if RUNTIME.multi_only and len(matched) == 1:
                 continue
 
-            candidate = matched[0]
-            if RUNTIME.dry_run:
-                success_rows.append(
-                    {
-                        "year": year,
-                        "source_file": target["source_file"],
-                        "ministry": target["ministry"],
-                        "program_name": target["program_name"],
-                        "activity_name": target["activity_name"],
-                        "downloaded_file": f"[DRY-RUN] {match_type}: {candidate.get('activity', '')}",
-                        "source_url": candidate.get("href") or search_url,
-                        "crawled_at": _now(),
-                    }
-                )
-                continue
-
-            download_target = dict(target)
-            download_target["_candidate"] = candidate
-            download_target["_search_url"] = candidate.get("listing_url") or search_url
-            result = await download_business_doc(page, download_target, save_dir)
-            if result["ok"]:
-                for downloaded_file in result["files"]:
+            for candidate in matched:
+                if RUNTIME.dry_run:
                     success_rows.append(
                         {
                             "year": year,
@@ -1317,33 +1505,53 @@ async def crawl_one_year(
                             "ministry": target["ministry"],
                             "program_name": target["program_name"],
                             "activity_name": target["activity_name"],
-                            "downloaded_file": str(Path(downloaded_file).name),
-                            "source_url": result["source_url"],
+                            "downloaded_file": f"[DRY-RUN] {match_type}: {candidate.get('activity', '')}",
+                            "source_url": candidate.get("href") or search_url,
                             "crawled_at": _now(),
                         }
                     )
-                if result.get("reason"):
+                    continue
+
+                download_target = dict(target)
+                download_target["_candidate"] = candidate
+                download_target["_search_url"] = candidate.get("listing_url") or search_url
+                result = await download_business_doc(page, download_target, save_dir)
+                if result["ok"]:
+                    for downloaded_file in result["files"]:
+                        success_rows.append(
+                            {
+                                "year": year,
+                                "source_file": target["source_file"],
+                                "ministry": target["ministry"],
+                                "program_name": target["program_name"],
+                                "activity_name": target["activity_name"],
+                                "downloaded_file": str(Path(downloaded_file).name),
+                                "source_url": result["source_url"],
+                                "crawled_at": _now(),
+                            }
+                        )
+                    if result.get("reason"):
+                        failed_rows.append(
+                            _failed_row(
+                                year=year,
+                                source_file=target["source_file"],
+                                ministry=target["ministry"],
+                                activity_name=target["activity_name"],
+                                reason="일부 첨부파일 다운로드 실패: " + result["reason"],
+                                searched_url=search_url,
+                            )
+                        )
+                else:
                     failed_rows.append(
                         _failed_row(
                             year=year,
                             source_file=target["source_file"],
                             ministry=target["ministry"],
                             activity_name=target["activity_name"],
-                            reason="일부 첨부파일 다운로드 실패: " + result["reason"],
+                            reason=result["reason"],
                             searched_url=search_url,
                         )
                     )
-            else:
-                failed_rows.append(
-                    _failed_row(
-                        year=year,
-                        source_file=target["source_file"],
-                        ministry=target["ministry"],
-                        activity_name=target["activity_name"],
-                        reason=result["reason"],
-                        searched_url=search_url,
-                    )
-                )
         except Exception as exc:
             failed_rows.append(
                 _failed_row(
@@ -1377,9 +1585,31 @@ def save_logs(
     success_df = pd.DataFrame(success_rows).reindex(columns=SUCCESS_COLUMNS)
     failed_df = pd.DataFrame(failed_rows).reindex(columns=FAILED_COLUMNS)
     target_df = targets.reindex(columns=TARGET_COLUMNS).copy()
-    success_df.to_csv(save_dir / "crawl_success.csv", index=False, encoding="utf-8-sig")
-    failed_df.to_csv(save_dir / "crawl_failed.csv", index=False, encoding="utf-8-sig")
-    target_df.to_csv(save_dir / "crawl_targets.csv", index=False, encoding="utf-8-sig")
+
+    def write_log(frame: pd.DataFrame, filename: str) -> None:
+        path = save_dir / filename
+        try:
+            frame.to_csv(path, index=False, encoding="utf-8-sig")
+        except PermissionError:
+            # Excel 등에서 기존 CSV를 열어 둔 경우 결과 유실 대신 보조 로그를 남긴다.
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fallback = path.with_name(f"{path.stem}_{timestamp}{path.suffix}")
+            try:
+                frame.to_csv(fallback, index=False, encoding="utf-8-sig")
+                LOGGER.warning(
+                    "로그 파일이 사용 중이라 보조 파일에 저장했습니다: %s", fallback
+                )
+            except PermissionError as exc:
+                # 폴더 자체 권한이 없더라도 이미 받은 문서까지 실패로 되돌리지는 않는다.
+                LOGGER.error(
+                    "로그 폴더 쓰기 권한 없음(문서 다운로드 결과는 유지): %s: %s",
+                    save_dir,
+                    exc,
+                )
+
+    write_log(success_df, "crawl_success.csv")
+    write_log(failed_df, "crawl_failed.csv")
+    write_log(target_df, "crawl_targets.csv")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -1389,6 +1619,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--year", type=int, help="특정 회계연도만 실행(예: 2026)")
     parser.add_argument("--headed", action="store_true", help="Chromium 창을 표시")
     parser.add_argument("--dry-run", action="store_true", help="매칭만 확인하고 다운로드하지 않음")
+    parser.add_argument("--multi-only", action="store_true", help="다중 후보(2건 이상 매칭)인 사업만 처리")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="동작 확인용으로 앞의 N개 대상 행만 처리(예: --limit 1)",
+    )
     parser.add_argument("--timeout", type=int, default=30_000, help="timeout(ms), 기본 30000")
     parser.add_argument("--min-delay", type=float, default=1.0, help="사업별 최소 대기(초)")
     parser.add_argument("--max-delay", type=float, default=2.0, help="사업별 최대 대기(초)")
@@ -1406,9 +1642,12 @@ async def main() -> int:
         raise SystemExit("--timeout은 1 이상이어야 합니다.")
     if args.min_delay < 0 or args.max_delay < args.min_delay:
         raise SystemExit("대기시간은 0 이상이고 max-delay >= min-delay 여야 합니다.")
+    if args.limit is not None and args.limit <= 0:
+        raise SystemExit("--limit은 1 이상이어야 합니다.")
     RUNTIME = RuntimeConfig(
         timeout_ms=args.timeout,
         dry_run=args.dry_run,
+        multi_only=args.multi_only,
         min_delay=args.min_delay,
         max_delay=args.max_delay,
     )
@@ -1417,6 +1656,8 @@ async def main() -> int:
     targets = build_targets(args.base_dir)
     if args.year is not None and not targets.empty:
         targets = targets[targets["year"] == args.year].copy()
+    if args.limit is not None and not targets.empty:
+        targets = targets.head(args.limit).copy()
 
     success_rows: list[dict[str, Any]] = []
     failed_rows: list[dict[str, Any]] = list(BUILD_FAILURES)
