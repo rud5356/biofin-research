@@ -76,6 +76,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--class_weight", action="store_true", help="train 분포 역비례 class weight 적용")
+    parser.add_argument(
+        "--balanced_sampling",
+        action="store_true",
+        help="학습 세트에서 클래스별 동일 개수를 매 epoch 복원/비복원 추출",
+    )
+    parser.add_argument(
+        "--samples_per_class",
+        type=int,
+        default=100,
+        help="balanced sampling에서 한 epoch에 추출할 클래스별 sample 수",
+    )
     parser.add_argument("--mixed_precision", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hwp_com", action="store_true", help="OLE/pyhwp 실패 시 한글 COM 자동화 시도")
     parser.add_argument("--dry_run", action="store_true")
@@ -100,6 +111,8 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("early_stopping_patience는 1 이상이어야 합니다")
     if args.num_labels < 2:
         raise ValueError("num_labels는 2 이상이어야 합니다")
+    if args.samples_per_class < 1:
+        raise ValueError("samples_per_class는 1 이상이어야 합니다")
 
 
 def save_match_outputs(
@@ -241,6 +254,48 @@ def make_class_weights(records: list[dict[str, Any]], device: Any, num_labels: i
     return torch.tensor(weights, dtype=torch.float32, device=device)
 
 
+def make_balanced_sampler(
+    records: list[dict[str, Any]], samples_per_class: int, seed: int
+):
+    """각 class에서 정확히 같은 수를 뽑고 epoch마다 다시 섞는 sampler."""
+    from torch.utils.data import Sampler
+
+    indices_by_label: dict[int, list[int]] = {}
+    for index, record in enumerate(records):
+        indices_by_label.setdefault(int(record["label"]), []).append(index)
+    present_labels = sorted(indices_by_label)
+
+    class ExactBalancedSampler(Sampler):
+        def __init__(self) -> None:
+            self.epoch = 0
+
+        def __iter__(self):
+            rng = np.random.default_rng(seed + self.epoch)
+            sampled: list[int] = []
+            for label in present_labels:
+                candidates = indices_by_label[label]
+                selected = rng.choice(
+                    candidates,
+                    size=samples_per_class,
+                    replace=len(candidates) < samples_per_class,
+                )
+                sampled.extend(int(index) for index in selected)
+            rng.shuffle(sampled)
+            self.epoch += 1
+            return iter(sampled)
+
+        def __len__(self) -> int:
+            return samples_per_class * len(present_labels)
+
+    LOGGER.info(
+        "balanced sampling: labels=%s, samples_per_class=%d, samples_per_epoch=%d",
+        present_labels,
+        samples_per_class,
+        samples_per_class * len(present_labels),
+    )
+    return ExactBalancedSampler()
+
+
 def _autocast(device: Any, enabled: bool):
     import torch
 
@@ -273,10 +328,16 @@ def train(args: argparse.Namespace, records: list[dict[str, Any]], output_dir: P
     valid_dataset = BudgetDocumentDataset(
         valid_records, tokenizer, max_length=args.max_length, stride=args.stride
     )
+    train_sampler = (
+        make_balanced_sampler(train_records, args.samples_per_class, args.seed)
+        if args.balanced_sampling
+        else None
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
         collate_fn=document_collate_fn,
@@ -306,9 +367,13 @@ def train(args: argparse.Namespace, records: list[dict[str, Any]], output_dir: P
             ) from exc
         raise
 
+    if args.balanced_sampling and args.class_weight:
+        LOGGER.warning(
+            "balanced sampling과 class weight의 이중 보정을 피하기 위해 class weight를 비활성화합니다."
+        )
     class_weights = (
         make_class_weights(train_records, device, args.num_labels)
-        if args.class_weight
+        if args.class_weight and not args.balanced_sampling
         else None
     )
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
