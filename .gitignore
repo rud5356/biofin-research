@@ -12,6 +12,7 @@ __pycache__/
 *.pt
 *.bin
 *.h5
+*.tar
 
 # 대용량 디렉토리
 **/data/

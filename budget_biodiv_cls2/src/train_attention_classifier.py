@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
+import re
 import sys
+import unicodedata
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mixed_precision", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hwp_com", action="store_true", help="OLE/pyhwp 실패 시 한글 COM 자동화 시도")
+    parser.add_argument(
+        "--document_only",
+        action="store_true",
+        help="사업설명 본문 추출 성공 건만 학습하고 예산정보 fallback은 제외",
+    )
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--debug", action="store_true")
     return parser
@@ -212,35 +218,273 @@ def run_dry_run(
     return 0
 
 
+def normalize_group_component(value: Any) -> str:
+    """연도별 표기 차이가 있어도 같은 부처/사업은 동일 그룹으로 묶는다."""
+
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = unicodedata.normalize("NFKC", str(value)).casefold()
+    return re.sub(r"[^0-9a-z가-힣]", "", text)
+
+
+def build_business_group_key(record: dict[str, Any]) -> str:
+    """소관명+세부사업명을 사업의 불변 KEY로 사용한다.
+
+    회계연도는 의도적으로 제외해 같은 사업의 다른 연도가 train/validation에
+    나뉘는 누수를 막는다. 사업명이 없는 비정상 행은 출처 행을 고유 키로 써서
+    서로 무관한 행이 한 그룹으로 합쳐지는 것을 피한다.
+    """
+
+    ministry = normalize_group_component(record.get("ministry"))
+    activity = normalize_group_component(record.get("activity_name"))
+    if activity:
+        return f"business::{ministry}::{activity}"
+
+    source_file = normalize_group_component(record.get("source_file"))
+    source_row = normalize_group_component(record.get("source_row"))
+    file_path = normalize_group_component(record.get("file_path"))
+    fallback = f"{source_file}::{source_row}" if source_file or source_row else file_path
+    if not fallback:
+        raise ValueError("사업 그룹 키 생성 실패: activity_name과 출처 식별자가 모두 없습니다")
+    return f"missing-activity::{fallback}"
+
+
+def _split_candidate_score(
+    labels: np.ndarray,
+    train_indices: np.ndarray,
+    valid_indices: np.ndarray,
+    valid_ratio: float,
+) -> tuple[float, float, float]:
+    """검증 크기와 train/validation 클래스 분포가 원본에 가까울수록 우선한다."""
+
+    classes = np.unique(labels)
+    class_valid_ratios = np.asarray(
+        [
+            np.sum(labels[valid_indices] == label) / np.sum(labels == label)
+            for label in classes
+        ]
+    )
+    missing_classes = sum(
+        int(not np.any(labels[train_indices] == label))
+        + int(not np.any(labels[valid_indices] == label))
+        for label in classes
+    )
+    size_error = abs(len(valid_indices) / len(labels) - valid_ratio)
+    # 다수 클래스가 점수를 지배하지 않도록 클래스별 valid 배정 비율을 동등하게 본다.
+    distribution_error = float(np.abs(class_valid_ratios - valid_ratio).mean())
+    # 어느 한쪽에서 클래스가 사라지는 후보는 가능한 한 선택하지 않는다.
+    return (
+        float(missing_classes),
+        distribution_error + size_error,
+        size_error,
+    )
+
+
 def split_records(
     records: list[dict[str, Any]], valid_ratio: float, seed: int
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    from sklearn.model_selection import train_test_split
+    """사업 그룹을 보존하면서 클래스 분포가 가장 나은 split을 선택한다."""
+
+    from sklearn.model_selection import GroupShuffleSplit
 
     if len(records) < 2:
         raise ValueError("학습/검증 분리에 최소 2개 문서가 필요합니다")
+
     labels = np.asarray([int(record["label"]) for record in records])
-    unique, counts = np.unique(labels, return_counts=True)
-    valid_count = max(1, int(math.ceil(len(records) * valid_ratio)))
-    train_count = len(records) - valid_count
-    can_stratify = (
-        len(unique) > 1
-        and counts.min() >= 2
-        and valid_count >= len(unique)
-        and train_count >= len(unique)
-    )
-    if not can_stratify:
+    groups = np.asarray([build_business_group_key(record) for record in records])
+    unique_groups = np.unique(groups)
+    if len(unique_groups) < 2:
+        raise ValueError("사업 그룹이 한 개뿐이라 학습/검증 분리를 할 수 없습니다")
+
+    group_labels: dict[str, set[int]] = {}
+    for group, label in zip(groups, labels):
+        group_labels.setdefault(str(group), set()).add(int(label))
+    conflicting_groups = {
+        group: values for group, values in group_labels.items() if len(values) > 1
+    }
+    if conflicting_groups:
         LOGGER.warning(
-            "클래스별 표본 수 또는 split 크기 때문에 stratified split 대신 고정 seed random split을 사용합니다."
+            "같은 사업 그룹에 서로 다른 label이 있는 그룹: %d개. 그룹 격리는 유지합니다.",
+            len(conflicting_groups),
         )
-    train_records, valid_records = train_test_split(
-        records,
-        test_size=valid_count,
+
+    candidates: list[tuple[np.ndarray, np.ndarray]] = []
+    desired_splits = max(2, int(round(1 / valid_ratio)))
+    n_splits = min(desired_splits, len(unique_groups))
+    try:
+        from sklearn.model_selection import StratifiedGroupKFold
+
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        candidates.extend(
+            (np.asarray(train_idx), np.asarray(valid_idx))
+            for train_idx, valid_idx in splitter.split(
+                np.zeros(len(records)), labels, groups
+            )
+        )
+    except (ImportError, ValueError) as exc:
+        LOGGER.warning("StratifiedGroupKFold 후보 생성 실패: %s", exc)
+
+    # 그룹 크기가 크게 다를 때를 위해 목표 valid_ratio에 가까운 후보도 함께 탐색한다.
+    shuffle_splitter = GroupShuffleSplit(
+        n_splits=min(64, max(16, len(unique_groups))),
+        test_size=valid_ratio,
         random_state=seed,
-        shuffle=True,
-        stratify=labels if can_stratify else None,
     )
+    candidates.extend(
+        (np.asarray(train_idx), np.asarray(valid_idx))
+        for train_idx, valid_idx in shuffle_splitter.split(
+            np.zeros(len(records)), labels, groups
+        )
+    )
+    candidates = [
+        (train_idx, valid_idx)
+        for train_idx, valid_idx in candidates
+        if len(train_idx) and len(valid_idx)
+    ]
+    if not candidates:
+        raise ValueError("유효한 사업 그룹 split 후보를 만들지 못했습니다")
+
+    train_indices, valid_indices = min(
+        candidates,
+        key=lambda pair: _split_candidate_score(
+            labels, pair[0], pair[1], valid_ratio
+        ),
+    )
+    train_groups = set(groups[train_indices])
+    valid_groups = set(groups[valid_indices])
+    overlap = train_groups & valid_groups
+    if overlap:
+        raise RuntimeError(f"사업 그룹 split 누수 감지: {len(overlap)}개")
+
+    LOGGER.info(
+        "group split: train=%d행/%d사업, valid=%d행/%d사업, overlap=0",
+        len(train_indices),
+        len(train_groups),
+        len(valid_indices),
+        len(valid_groups),
+    )
+    LOGGER.info(
+        "group split label 분포: train=%s, valid=%s",
+        dict(zip(*np.unique(labels[train_indices], return_counts=True))),
+        dict(zip(*np.unique(labels[valid_indices], return_counts=True))),
+    )
+    train_records = [records[int(index)] for index in train_indices]
+    valid_records = [records[int(index)] for index in valid_indices]
     return train_records, valid_records
+
+
+def save_split_outputs(
+    train_records: list[dict[str, Any]],
+    valid_records: list[dict[str, Any]],
+    output_dir: Path,
+) -> None:
+    """split 배정과 그룹 중복 0건을 사람이 재검증할 수 있게 저장한다."""
+
+    train_groups = {build_business_group_key(record) for record in train_records}
+    valid_groups = {build_business_group_key(record) for record in valid_records}
+    overlap = train_groups & valid_groups
+    if overlap:
+        raise RuntimeError(f"split 저장 전 사업 그룹 누수 감지: {len(overlap)}개")
+
+    all_records = train_records + valid_records
+    labels_by_group: dict[str, set[int]] = {}
+    records_by_group: dict[str, list[dict[str, Any]]] = {}
+    for record in all_records:
+        group_key = build_business_group_key(record)
+        labels_by_group.setdefault(group_key, set()).add(int(record["label"]))
+        records_by_group.setdefault(group_key, []).append(record)
+    conflicting_keys = {
+        key for key, labels in labels_by_group.items() if len(labels) > 1
+    }
+
+    rows: list[dict[str, Any]] = []
+    for split_name, split_records_value in (
+        ("train", train_records),
+        ("valid", valid_records),
+    ):
+        for record in split_records_value:
+            rows.append(
+                {
+                    "split": split_name,
+                    "group_key": build_business_group_key(record),
+                    "year": record.get("year", ""),
+                    "ministry": record.get("ministry", ""),
+                    "activity_name": record.get("activity_name", ""),
+                    "label": record.get("label", ""),
+                    "source_type": record.get("source_type", ""),
+                    "file_path": record.get("file_path", ""),
+                }
+            )
+    write_csv(rows, output_dir / "split_assignments.csv")
+    conflict_rows = []
+    for group_key in sorted(conflicting_keys):
+        group_records = records_by_group[group_key]
+        first = group_records[0]
+        conflict_rows.append(
+            {
+                "group_key": group_key,
+                "labels": "|".join(
+                    str(label) for label in sorted(labels_by_group[group_key])
+                ),
+                "row_count": len(group_records),
+                "years": "|".join(
+                    sorted({str(record.get("year", "")) for record in group_records})
+                ),
+                "ministry": first.get("ministry", ""),
+                "activity_name": first.get("activity_name", ""),
+            }
+        )
+    write_csv(
+        pd.DataFrame(
+            conflict_rows,
+            columns=[
+                "group_key",
+                "labels",
+                "row_count",
+                "years",
+                "ministry",
+                "activity_name",
+            ],
+        ),
+        output_dir / "split_conflicting_groups.csv",
+    )
+    write_json(
+        {
+            "strategy": "ministry_activity_group_split",
+            "train_rows": len(train_records),
+            "valid_rows": len(valid_records),
+            "train_groups": len(train_groups),
+            "valid_groups": len(valid_groups),
+            "overlap_groups": len(overlap),
+            "conflicting_label_groups": len(conflicting_keys),
+            "train_label_counts": {
+                str(int(label)): int(count)
+                for label, count in sorted(
+                    pd.Series([row["label"] for row in train_records])
+                    .value_counts()
+                    .items()
+                )
+            },
+            "valid_label_counts": {
+                str(int(label)): int(count)
+                for label, count in sorted(
+                    pd.Series([row["label"] for row in valid_records])
+                    .value_counts()
+                    .items()
+                )
+            },
+        },
+        output_dir / "split_summary.json",
+    )
 
 
 def make_class_weights(records: list[dict[str, Any]], device: Any, num_labels: int):
@@ -321,6 +565,7 @@ def train(args: argparse.Namespace, records: list[dict[str, Any]], output_dir: P
 
     train_records, valid_records = split_records(records, args.valid_ratio, args.seed)
     LOGGER.info("train=%d, valid=%d", len(train_records), len(valid_records))
+    save_split_outputs(train_records, valid_records, output_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     train_dataset = BudgetDocumentDataset(
         train_records, tokenizer, max_length=args.max_length, stride=args.stride
@@ -523,12 +768,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         LOGGER.info("문서 %d개, label 행 %d개를 확인했습니다.", len(documents), len(labels))
         matched, failed = match_documents_to_labels(documents, labels)
-        _, initial_fallback_success = build_metadata_fallback_records(
-            labels, failed
-        )
-        training_candidates = pd.concat(
-            [matched, initial_fallback_success], ignore_index=True, sort=False
-        )
+        if args.document_only:
+            training_candidates = matched.copy()
+            LOGGER.info(
+                "document-only 모드: 예산정보 fallback을 제외하고 매칭 문서만 사용합니다."
+            )
+        else:
+            _, initial_fallback_success = build_metadata_fallback_records(
+                labels, failed
+            )
+            training_candidates = pd.concat(
+                [matched, initial_fallback_success], ignore_index=True, sort=False
+            )
         save_match_outputs(training_candidates, failed, output_dir)
 
         if args.dry_run:
@@ -553,11 +804,21 @@ def main(argv: list[str] | None = None) -> int:
             )
         if not parse_failed.empty:
             failed = pd.concat([failed, parse_failed], ignore_index=True)
-        fallback_records, fallback_success = build_metadata_fallback_records(labels, failed)
-        records.extend(fallback_records)
-        final_success = pd.concat(
-            [parsed_success, fallback_success], ignore_index=True, sort=False
-        )
+        if args.document_only:
+            fallback_records: list[dict[str, Any]] = []
+            final_success = parsed_success
+            LOGGER.info(
+                "document-only 모드: 본문 추출 성공 %d건만 학습에 사용합니다.",
+                len(records),
+            )
+        else:
+            fallback_records, fallback_success = build_metadata_fallback_records(
+                labels, failed
+            )
+            records.extend(fallback_records)
+            final_success = pd.concat(
+                [parsed_success, fallback_success], ignore_index=True, sort=False
+            )
         save_match_outputs(final_success, failed, output_dir)
         LOGGER.info(
             "본문 사용=%d, 예산정보 fallback=%d, 문서 파싱 실패=%d",

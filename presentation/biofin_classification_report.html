@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BIOFIN 분류를 위한 어텐션 모델 생성 및 분류 결과</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet" />
+
+<style>
+/* ===========================================
+   THEME: ELECTRIC STUDIO
+   Change these to change the whole look
+   =========================================== */
+:root {
+  --bg-dark: #0a0a0a;
+  --bg-white: #ffffff;
+  --bg-page: #f5f7fb;
+  --accent-blue: #2a5fd6;
+  --accent-blue-deep: #16337a;
+  --accent-blue-tint: #eaf0fd;
+  --text-dark: #0a0a0a;
+  --text-light: #ffffff;
+  --text-secondary: #55596b;
+  --text-muted: #8b8fa3;
+  --line: #e2e5ee;
+  --good: #0ca30c;
+  --warn: #c98500;
+  --critical: #d03b3b;
+
+  /* natural category tones (0 = grey / 관련없음, 1~9 = BIOFIN 9대 범주) */
+  --cat-0: #9a9a9a;
+  --cat-1: #2f6f4e;
+  --cat-2: #1f9e78;
+  --cat-3: #9a8a3d;
+  --cat-4: #c98500;
+  --cat-5: #3d6a8a;
+  --cat-6: #8a5a3d;
+  --cat-7: #16794f;
+  --cat-8: #5b5a86;
+  --cat-9: #a15c3e;
+
+  --font-display: 'Manrope', sans-serif;
+  --font-body: 'Manrope', sans-serif;
+
+  --title-size: clamp(1.9rem, 6vw, 4.2rem);
+  --h2-size: clamp(1.6rem, 4.6vw, 3.1rem);
+  --h3-size: clamp(1.2rem, 2.8vw, 1.95rem);
+  --body-size: clamp(0.95rem, 1.9vw, 1.35rem);
+  --small-size: clamp(0.78rem, 1.3vw, 1.05rem);
+  --tiny-size: clamp(0.68rem, 1vw, 0.86rem);
+
+  --slide-padding: clamp(1rem, 3vw, 2.5rem);
+  --content-gap: clamp(0.6rem, 2.4vw, 2.4rem);
+  --element-gap: clamp(0.25rem, 1vw, 1rem);
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-normal: 0.25s;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body { font-family: var(--font-body); background: var(--bg-page); color: var(--text-dark); }
+
+/* ===========================================
+   VIEWPORT FITTING: MANDATORY BASE STYLES (viewport-base.css, verbatim)
+   =========================================== */
+html, body { height: 100%; }
+html { overflow: hidden; }
+body {
+  display: flex; flex-direction: row; width: 100vw; height: 100vh; height: 100dvh;
+  overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+.slide {
+  width: 100vw; height: 100vh; height: 100dvh; flex-shrink: 0;
+  overflow: hidden; scroll-snap-align: start;
+  display: flex; flex-direction: column; position: relative;
+}
+.slide-content {
+  flex: 1; display: flex; flex-direction: column; justify-content: center;
+  max-height: 100%; overflow: hidden; padding: var(--slide-padding);
+}
+.card, .container, .content-box { max-width: min(90vw, 1000px); max-height: min(80vh, 700px); }
+.feature-list, .bullet-list { gap: clamp(0.4rem, 1vh, 1rem); }
+.feature-list li, .bullet-list li { font-size: var(--body-size); line-height: 1.4; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); gap: clamp(0.5rem, 1.5vw, 1rem); }
+img, .image-container { max-width: 100%; max-height: min(50vh, 400px); object-fit: contain; }
+
+@media (max-height: 700px) {
+  :root {
+    --slide-padding: clamp(0.75rem, 3vw, 2rem);
+    --content-gap: clamp(0.4rem, 1.5vw, 1rem);
+    --title-size: clamp(1.25rem, 4.5vw, 2.5rem);
+    --h2-size: clamp(1rem, 3vw, 1.75rem);
+  }
+}
+@media (max-height: 600px) {
+  :root {
+    --slide-padding: clamp(0.5rem, 2.5vw, 1.5rem);
+    --content-gap: clamp(0.3rem, 1vw, 0.75rem);
+    --title-size: clamp(1.1rem, 4vw, 2rem);
+    --body-size: clamp(0.7rem, 1.2vw, 0.95rem);
+  }
+  .nav-dots, .keyboard-hint, .decorative { display: none; }
+}
+@media (max-height: 500px) {
+  :root {
+    --slide-padding: clamp(0.4rem, 2vw, 1rem);
+    --title-size: clamp(1rem, 3.5vw, 1.5rem);
+    --h2-size: clamp(0.9rem, 2.5vw, 1.25rem);
+    --body-size: clamp(0.65rem, 1vw, 0.85rem);
+  }
+}
+@media (max-width: 600px) {
+  :root { --title-size: clamp(1.25rem, 7vw, 2.5rem); }
+  .grid { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.2s !important; }
+  html { scroll-behavior: auto; }
+}
+
+/* ===========================================
+   REVEAL ANIMATION (staggered on scroll-in)
+   =========================================== */
+.reveal {
+  opacity: 0; transform: translateY(20px);
+  transition: opacity var(--duration-normal) var(--ease-out-expo), transform var(--duration-normal) var(--ease-out-expo);
+}
+.slide.visible .reveal { opacity: 1; transform: translateY(0); }
+.reveal:nth-child(1) { transition-delay: 0.05s; }
+.reveal:nth-child(2) { transition-delay: 0.12s; }
+.reveal:nth-child(3) { transition-delay: 0.19s; }
+.reveal:nth-child(4) { transition-delay: 0.26s; }
+.reveal:nth-child(5) { transition-delay: 0.33s; }
+
+/* ===========================================
+   CHROME: progress bar, nav dots, keyboard hint
+   =========================================== */
+.progress-bar {
+  position: fixed; top: 0; left: 0; height: 3px; width: 0%;
+  background: var(--accent-blue); z-index: 9000; transition: width 0.15s linear;
+}
+.nav-dots {
+  position: fixed; bottom: clamp(2rem, 5.5vh, 3rem); left: 50%; transform: translateX(-50%);
+  display: flex; flex-direction: row; gap: clamp(0.3rem, 1vh, 0.55rem); z-index: 9000;
+}
+.nav-dots button {
+  width: 7px; height: 7px; border-radius: 50%; border: none; padding: 0;
+  background: rgba(10,10,10,0.18); cursor: pointer; transition: background 0.2s, transform 0.2s;
+}
+.nav-dots button.active { background: var(--accent-blue); transform: scale(1.5); }
+.slide-index {
+  position: absolute; top: clamp(0.75rem, 2.5vh, 1.5rem); left: clamp(1rem, 4vw, 4rem);
+  font-size: var(--tiny-size); letter-spacing: 0.08em; color: var(--text-muted); font-weight: 700;
+  z-index: 5;
+}
+.slide-index.on-dark { color: rgba(255,255,255,0.65); }
+.keyboard-hint {
+  position: fixed; bottom: clamp(0.6rem, 2vh, 1rem); left: 50%; transform: translateX(-50%);
+  font-size: var(--tiny-size); color: var(--text-muted); z-index: 9000; opacity: 0.7;
+}
+
+/* ===========================================
+   SHARED TYPOGRAPHY / LAYOUT COMPONENTS
+   =========================================== */
+.eyebrow {
+  font-size: var(--small-size); font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--accent-blue); margin-bottom: clamp(0.4rem, 1.2vh, 0.8rem);
+}
+h2.title {
+  font-family: var(--font-display); font-weight: 800; font-size: var(--h2-size);
+  line-height: 1.2; color: var(--text-dark); max-width: 26ch;
+}
+.caption {
+  font-size: var(--small-size); color: var(--text-secondary); margin-top: clamp(0.6rem, 2vh, 1.2rem);
+  max-width: 62ch; line-height: 1.55;
+}
+.slide.content-slide { background: var(--bg-white); }
+.slide.content-slide.tint { background: var(--bg-page); }
+.slide.content-slide::before {
+  content: ''; position: absolute; left: 50%; top: 0; width: clamp(36px, 6vw, 64px); height: clamp(3px, 0.4vh, 4px);
+  background: var(--accent-blue); transform: translateX(-50%);
+}
+.slide.content-slide .slide-content { align-items: center; text-align: center; }
+.slide.content-slide .slide-content > * { margin-left: auto; margin-right: auto; }
+
+.stat-row { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--content-gap); margin-top: var(--content-gap); }
+.stat-tile {
+  flex: 1; min-width: min(100%, 260px); background: var(--bg-page); border: 1px solid var(--line);
+  border-radius: 12px; padding: clamp(0.9rem, 2.6vh, 1.6rem) clamp(1.1rem, 2.6vw, 1.8rem);
+}
+.stat-tile .num {
+  font-family: var(--font-display); font-weight: 800; font-size: clamp(1.8rem, 5.4vw, 3.2rem); color: var(--accent-blue);
+  font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+.stat-tile.warn { background: #fdf5e6; border-color: #f0d9a8; }
+.stat-tile.warn .num { color: var(--warn); }
+.stat-tile.ok { background: #edf9ed; border-color: #c3e8c3; }
+.stat-tile.ok .num { color: var(--good); }
+.stat-tile .label { font-size: var(--small-size); color: var(--text-secondary); margin-top: 0.3rem; }
+.stat-tile .flag { font-size: var(--tiny-size); color: var(--warn); font-weight: 700; margin-top: 0.25rem; }
+
+.flow { display: flex; align-items: center; justify-content: center; gap: clamp(0.4rem, 1.5vw, 1rem); flex-wrap: wrap; margin-top: var(--content-gap); }
+.flow-node {
+  background: var(--bg-page); border: 1px solid var(--line); border-radius: 12px;
+  padding: clamp(0.7rem, 2.1vh, 1.35rem) clamp(1rem, 2.6vw, 1.7rem); text-align: center;
+  font-size: var(--body-size); font-weight: 600; min-width: fit-content;
+}
+.flow-node .icon { font-size: clamp(1.4rem, 3.8vw, 2.4rem); display: block; margin-bottom: 0.25rem; }
+.flow-arrow { color: var(--accent-blue); font-size: clamp(1.2rem, 3vw, 2rem); font-weight: 700; }
+
+.cat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: clamp(0.5rem, 1.6vw, 1.1rem); margin-top: var(--content-gap); max-width: min(80vw, 900px); }
+.cat-card {
+  border-radius: 12px; padding: clamp(0.65rem, 2.1vh, 1.2rem) clamp(0.65rem, 1.6vw, 1.05rem);
+  color: var(--text-light); position: relative; overflow: hidden;
+}
+.cat-card .n { font-family: var(--font-display); font-weight: 800; font-size: clamp(1.3rem, 3.4vw, 2.1rem); opacity: 0.85; }
+.cat-card .label { font-size: var(--tiny-size); font-weight: 600; margin-top: 0.15rem; }
+.cat-zero {
+  display: inline-flex; align-items: center; gap: 0.5rem; background: var(--cat-0); color: var(--text-light);
+  border-radius: 10px; padding: clamp(0.4rem, 1.4vh, 0.7rem) clamp(0.9rem, 2vw, 1.3rem); font-weight: 700; font-size: var(--body-size);
+}
+
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(1rem, 3vw, 2.5rem); margin-top: var(--content-gap); max-width: min(88vw, 1100px); text-align: center; }
+.col-block { }
+.col-label { font-size: var(--small-size); font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.5rem; }
+.chip-row { display: flex; flex-wrap: wrap; justify-content: center; gap: clamp(0.3rem, 1vw, 0.5rem); }
+.chip {
+  background: var(--accent-blue-tint); color: var(--accent-blue-deep); border-radius: 999px;
+  padding: 0.45rem 1rem; font-size: var(--small-size); font-weight: 700;
+}
+
+.record-row { display: flex; flex-wrap: wrap; justify-content: center; gap: clamp(0.35rem, 1.1vw, 0.6rem); margin-top: var(--content-gap); max-width: min(90vw, 1200px); }
+.field-chip { background: var(--accent-blue); color: var(--text-light); border-radius: 8px; padding: clamp(0.45rem, 1.5vh, 0.7rem) clamp(0.75rem, 1.8vw, 1.1rem); font-size: var(--small-size); font-weight: 600; }
+.field-chip.locked { background: transparent; border: 2px dashed var(--text-muted); color: var(--text-muted); display: flex; align-items: center; gap: 0.3rem; }
+
+.sentence-block {
+  background: var(--bg-page); border: 1px solid var(--line); border-radius: 10px;
+  padding: clamp(0.7rem, 2vh, 1.2rem) clamp(0.9rem, 2vw, 1.4rem); font-size: var(--body-size);
+  line-height: 1.7; color: var(--text-dark); max-width: min(82vw, 880px); font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+.sentence-block b { color: var(--accent-blue); }
+
+.branch-row { display: flex; justify-content: center; gap: clamp(1rem, 3.5vw, 2.4rem); margin-top: var(--content-gap); flex-wrap: wrap; max-width: min(84vw, 900px); }
+.branch { flex: 1; min-width: min(100%, 300px); border-radius: 12px; padding: clamp(1rem, 2.6vh, 1.7rem); }
+.branch.yes { background: var(--accent-blue-tint); }
+.branch.no { background: var(--bg-page); border: 1px solid var(--line); }
+.branch .h { font-weight: 800; font-size: var(--h3-size); margin-bottom: 0.3rem; }
+.branch .n { font-family: var(--font-display); font-weight: 800; font-size: clamp(1.6rem, 4.4vw, 2.7rem); color: var(--accent-blue); font-variant-numeric: tabular-nums; }
+.branch .d { font-size: var(--small-size); color: var(--text-secondary); }
+
+.dot-grid { display: grid; grid-template-columns: repeat(20, 1fr); gap: clamp(3px, 0.45vw, 6px); margin-top: var(--content-gap); max-width: min(72vw, 640px); }
+.dot-grid span { width: 100%; aspect-ratio: 1; border-radius: 50%; background: var(--cat-0); opacity: 0.55; }
+.dot-grid span.hit { opacity: 1; }
+
+.chart-wrap { margin-top: var(--content-gap); max-width: min(58vw, 660px); width: 100%; }
+.chart-wrap svg { width: 100%; height: auto; overflow: visible; }
+.axis-label { font-size: var(--tiny-size); fill: var(--text-muted); font-family: var(--font-body); }
+.line-label { font-size: var(--tiny-size); fill: var(--text-dark); font-weight: 700; font-family: var(--font-body); }
+
+table.perf-table { border-collapse: collapse; margin-top: var(--content-gap); width: 100%; max-width: min(88vw, 1000px); font-variant-numeric: tabular-nums; }
+table.perf-table th, table.perf-table td { text-align: left; padding: clamp(0.28rem, 1vh, 0.5rem) clamp(0.5rem, 1.4vw, 0.9rem); font-size: var(--small-size); border-bottom: 1px solid var(--line); }
+table.perf-table th { color: var(--text-muted); font-weight: 700; text-transform: uppercase; font-size: var(--tiny-size); letter-spacing: 0.05em; }
+table.perf-table td.n { color: var(--accent-blue); font-weight: 700; }
+table.perf-table tr.low-n td { color: var(--text-muted); }
+table.perf-table .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.4rem; }
+table.perf-table .warn-flag { color: var(--warn); font-weight: 700; margin-left: 0.35rem; }
+
+.limits-grid { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(0.35rem, 1.3vh, 0.7rem) clamp(1.2rem, 3vw, 2.5rem); margin-top: var(--content-gap); max-width: min(88vw, 1000px); text-align: left; }
+.limits-grid li { font-size: var(--small-size); line-height: 1.4; list-style: none; padding-left: 1rem; position: relative; }
+.limits-grid li::before { content: '—'; position: absolute; left: 0; color: var(--warn); }
+.closing-line { font-size: var(--body-size); font-style: italic; color: var(--text-secondary); margin-top: clamp(0.8rem, 2.2vh, 1.4rem); max-width: 62ch; line-height: 1.6; }
+
+/* ===========================================
+   TITLE & CLOSING SLIDE (split panel, bookend)
+   =========================================== */
+.split-slide { }
+.panel-top {
+  flex: 1.05; background: var(--bg-white); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+  padding: clamp(1.4rem, 5vw, 4rem); position: relative;
+}
+.panel-top > * { margin-left: auto; margin-right: auto; }
+.panel-top::before { content: ''; position: absolute; left: 50%; top: 0; width: clamp(36px, 6vw, 64px); height: clamp(3px, 0.4vh, 4px); background: var(--accent-blue); transform: translateX(-50%); }
+.panel-top h1 {
+  font-family: var(--font-display); font-weight: 800; font-size: var(--title-size);
+  color: var(--text-dark); line-height: 1.14; max-width: 20ch; margin-top: clamp(0.5rem, 1.5vh, 1rem);
+}
+.panel-bottom {
+  flex: 1; background: var(--accent-blue); color: var(--text-light);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: clamp(1.4rem, 5vw, 4rem);
+}
+.panel-bottom > * { margin-left: auto; margin-right: auto; }
+.panel-bottom .flow-node { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.25); color: var(--text-light); }
+.panel-bottom .flow-arrow { color: rgba(255,255,255,0.85); }
+.panel-top p.sub, .panel-bottom p.sub { font-size: var(--body-size); max-width: 52ch; margin-top: clamp(0.7rem, 2vh, 1.2rem); line-height: 1.6; opacity: 0.95; }
+.panel-bottom .limits-grid { text-align: left; }
+.footer-row { display: flex; justify-content: center; gap: clamp(1rem, 4vw, 3rem); align-items: center; margin-top: clamp(0.9rem, 2.4vh, 1.5rem); font-size: var(--tiny-size); opacity: 0.85; width: 100%; max-width: min(52vw, 460px); }
+.mark { font-weight: 800; letter-spacing: 0.06em; }
+
+/* ===========================================
+   INLINE EDITING (opt-in)
+   =========================================== */
+.edit-hotzone { position: fixed; top: 0; left: 0; width: 80px; height: 80px; z-index: 10000; cursor: pointer; }
+.edit-toggle {
+  position: fixed; top: clamp(0.6rem, 2vh, 1rem); left: clamp(0.6rem, 2vw, 1rem); z-index: 10001;
+  width: 38px; height: 38px; border-radius: 50%; border: none; background: var(--bg-white);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.18); font-size: 1.1rem; cursor: pointer;
+  opacity: 0; pointer-events: none; transition: opacity 0.3s ease;
+}
+.edit-toggle.show, .edit-toggle.active { opacity: 1; pointer-events: auto; }
+.edit-banner {
+  position: fixed; top: 0; left: 0; right: 0; background: var(--accent-blue); color: var(--text-light);
+  text-align: center; font-size: var(--small-size); padding: 0.4rem; z-index: 9999;
+  transform: translateY(-100%); transition: transform 0.25s ease;
+}
+.edit-banner.active, .edit-banner.show { transform: translateY(0); }
+body.edit-active [contenteditable="true"] { outline: 1px dashed var(--accent-blue); outline-offset: 3px; cursor: text; }
+</style>
+</head>
+<body>
+
+<div class="progress-bar" id="progressBar"></div>
+<nav class="nav-dots" id="navDots"></nav>
+<div class="edit-hotzone" id="editHotzone"></div>
+<button class="edit-toggle" id="editToggle" title="편집 모드 (E)">✏️</button>
+<div class="edit-banner" id="editBanner">편집 모드 · 텍스트를 클릭해 수정하세요 · Ctrl+S로 저장</div>
+
+<!-- ========== SLIDE 1: TITLE ========== -->
+<section class="slide split-slide">
+  <div class="panel-top">
+    <div class="eyebrow reveal">BIOFIN 예산분류 실험 보고 · 진행사항 보고</div>
+    <h1 class="reveal" contenteditable="false">BIOFIN 분류 모델 구축 및<br>입출력 파이프라인 검증</h1>
+  </div>
+  <div class="panel-bottom">
+    <div class="flow reveal">
+      <div class="flow-node"><span class="icon">📄</span>예산·사업설명</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node"><span class="icon">🤖</span>어텐션 모델</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node"><span class="icon">🔟</span>10개 범주</div>
+    </div>
+    <p class="sub reveal" contenteditable="false">예산자료 입력부터 모델 학습 및 결과 출력까지 전체 과정의 정상 작동 여부를 확인</p>
+    <div class="footer-row"><span class="mark">BIOFIN RESEARCH</span><span>01 / 14</span></div>
+  </div>
+</section>
+
+<!-- ========== SLIDE 2 ========== -->
+<section class="slide content-slide">
+  <div class="slide-index">02 · 과제 정의</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">분류 과제</div>
+    <h2 class="title reveal" contenteditable="false">관련 없음 및 BIOFIN 9개 범주 중 하나를 출력하도록 구성</h2>
+    <div class="reveal" style="margin-top: var(--content-gap);">
+      <span class="cat-zero">0 · 관련 없음</span>
+    </div>
+    <div class="cat-grid reveal">
+      <div class="cat-card" style="background:var(--cat-1)"><div class="n">1</div><div class="label">보호구역</div></div>
+      <div class="cat-card" style="background:var(--cat-2)"><div class="n">2</div><div class="label">생태계 복원</div></div>
+      <div class="cat-card" style="background:var(--cat-3)"><div class="n">3</div><div class="label">유전자원</div></div>
+      <div class="cat-card" style="background:var(--cat-4)"><div class="n">4</div><div class="label">지속가능한 이용</div></div>
+      <div class="cat-card" style="background:var(--cat-5)"><div class="n">5</div><div class="label">오염관리</div></div>
+      <div class="cat-card" style="background:var(--cat-6)"><div class="n">6</div><div class="label">조사·교육·지식</div></div>
+      <div class="cat-card" style="background:var(--cat-7)"><div class="n">7</div><div class="label">녹색경제</div></div>
+      <div class="cat-card" style="background:var(--cat-8)"><div class="n">8</div><div class="label">정책·개발계획</div></div>
+      <div class="cat-card" style="background:var(--cat-9)"><div class="n">9</div><div class="label">기타 관련 활동</div></div>
+    </div>
+    <p class="caption reveal" contenteditable="false">각 예산사업에 대해 0번 또는 BIOFIN 9개 범주 중 하나를 출력하도록 분류 설정</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 3 ========== -->
+<section class="slide content-slide tint">
+  <div class="slide-index">03 · 데이터 입력</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">데이터 입력</div>
+    <h2 class="title reveal" contenteditable="false">예산사업(42,749건) 및 사업설명서(2,703개)를 입력자료로 사용</h2>
+    <div class="two-col reveal">
+      <div class="col-block">
+        <div class="col-label">예산 CSV (2019 ~ 2023)</div>
+        <div class="chip-row">
+          <span class="chip">2019</span><span class="chip">2020</span><span class="chip">2021</span><span class="chip">2022</span><span class="chip">2023</span>
+        </div>
+      </div>
+      <div class="col-block">
+        <div class="col-label">사업설명 문서</div>
+        <div class="chip-row">
+          <span class="chip">HWP 2,614개</span><span class="chip">HWPX 89개</span>
+        </div>
+      </div>
+    </div>
+    <div class="stat-row reveal" style="max-width:min(60vw,520px)">
+      <div class="stat-tile"><div class="num">42,749</div><div class="label">총 예산 행</div></div>
+    </div>
+    <p class="caption reveal" contenteditable="false">2019~2023년 예산 CSV 5개와 HWP·HWPX 사업설명자료를 입력자료로 사용</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 4 ========== -->
+<section class="slide content-slide">
+  <div class="slide-index">04 · 데이터 구조</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">예산 데이터 구조</div>
+    <h2 class="title reveal" contenteditable="false">한 행의 13개 예산 항목을 모델 입력으로 사용</h2>
+    <div class="record-row reveal">
+      <span class="field-chip">회계연도</span>
+      <span class="field-chip">소관명</span>
+      <span class="field-chip">실국명</span>
+      <span class="field-chip">분야</span>
+      <span class="field-chip">부문</span>
+      <span class="field-chip">프로그램명</span>
+      <span class="field-chip">단위사업명</span>
+      <span class="field-chip">세부사업명</span>
+      <span class="field-chip">사업유형</span>
+      <span class="field-chip">예산현액</span>
+      <span class="field-chip">국회확정(정부안)금액</span>
+      <span class="field-chip">국회확정금액</span>
+      <span class="field-chip">결산액</span>
+      <span class="field-chip locked">🔒 biofin_category</span>
+    </div>
+    <p class="caption reveal" contenteditable="false">예산 항목은 입력으로 사용하고, biofin_category는 학습·검증을 위한 임시 기준 라벨로 사용</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 5 ========== -->
+<section class="slide content-slide tint">
+  <div class="slide-index">05 · 텍스트 변환</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">문장 변환</div>
+    <h2 class="title reveal" style="max-width:40ch;" contenteditable="false">CSV 한 행을 열 이름이 포함된 문장으로 변환</h2>
+    <div class="flow reveal" style="align-items:stretch;">
+      <div class="flow-node">CSV 한 행</div>
+      <span class="flow-arrow">→</span>
+      <div class="sentence-block">
+        <b>회계연도:</b> 2019<br>
+        <b>소관명:</b> 환경부<br>
+        <b>세부사업명:</b> 습지복원사업<br>
+        <b>국회확정금액:</b> ...
+      </div>
+    </div>
+    <p class="caption reveal" contenteditable="false">열 이름과 값을 연결해 모델이 각 항목의 의미를 구분할 수 있도록 변환</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 6 ========== -->
+<section class="slide content-slide">
+  <div class="slide-index">06 · 문서 결합</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">문서 결합 방식</div>
+    <h2 class="title reveal" contenteditable="false">사업설명 본문을 연결하고 미연결 사업은 예산정보만 사용</h2>
+    <div class="branch-row reveal">
+      <div class="branch yes">
+        <div class="h">문서 있음</div>
+        <div class="d">예산정보 + 사업설명 본문</div>
+        <div class="n">2,136건</div>
+      </div>
+      <div class="branch no">
+        <div class="h">문서 없음</div>
+        <div class="d">예산정보만</div>
+        <div class="n">40,470건</div>
+      </div>
+    </div>
+    <div class="stat-row reveal" style="max-width:min(40vw,360px)">
+      <div class="stat-tile"><div class="num">42,606</div><div class="label">총 모델 입력 건수</div></div>
+    </div>
+    <p class="caption reveal" contenteditable="false">본문 포함 2,136건과 예산정보만 포함한 40,470건을 합쳐 총 42,606건의 모델 입력을 구성</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 7 ========== -->
+<section class="slide content-slide tint">
+  <div class="slide-index">07 · 데이터 분할</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">학습·검증 분할</div>
+    <h2 class="title reveal" contenteditable="false">동일 사업이 학습·검증 데이터에 중복되지 않도록 분리</h2>
+    <div class="flow reveal">
+      <div class="flow-node">같은 사업<br><span style="font-weight:400;font-size:var(--tiny-size)">소관명 · 세부사업명 동일</span></div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node">한쪽으로만 이동</div>
+    </div>
+    <div class="stat-row reveal">
+      <div class="stat-tile"><div class="num">34,085</div><div class="label">학습</div></div>
+      <div class="stat-tile"><div class="num">8,521</div><div class="label">검증</div></div>
+      <div class="stat-tile"><div class="num">0건</div><div class="label">중복 사업 그룹</div></div>
+    </div>
+    <p class="caption reveal" contenteditable="false">소관명과 세부사업명이 같은 자료는 한쪽 데이터에만 배치했으며, 학습·검증 간 중복 사업 그룹은 0건이었음.</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 8 ========== -->
+<section class="slide content-slide">
+  <div class="slide-index">08 · 데이터 불균형</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">데이터 불균형</div>
+    <h2 class="title reveal" contenteditable="false">데이터 불균형 완화를 위해 균형 표본추출을 적용</h2>
+    <div class="dot-grid reveal" id="dotGrid"></div>
+    <div class="stat-row reveal" style="max-width:min(72vw,640px)">
+      <div class="stat-tile"><div class="num">40,447</div><div class="label">0번 (관련 없음)</div></div>
+      <div class="stat-tile warn"><div class="num">17</div><div class="label">8번 (가장 적은 범주)</div></div>
+    </div>
+    <p class="caption reveal" contenteditable="false">매 학습 회차마다 범주별 100건을 추출했음. 표본이 100건보다 적은 범주는 복원추출(반복 샘플링)로 채우고, 0번처럼 표본이 넘치는 범주는 일부만 추출해 모든 범주가 균형 있게 학습에 포함되도록 구성</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 9 ========== -->
+<section class="slide content-slide tint">
+  <div class="slide-index">09 · 모델 구조</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">모델 구조</div>
+    <h2 class="title reveal" contenteditable="false">긴 입력을 512토큰 단위로 분할해 모델에 전달</h2>
+    <div class="flow reveal" style="margin-top:var(--content-gap)">
+      <div class="flow-node">긴 사업설명서</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node">512토큰씩 분할</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node">조각 1 · 2 · 3</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node">KLUE/RoBERTa</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node">Attention</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node" style="background:var(--accent-blue);color:var(--text-light)">0 ~ 9 범주</div>
+    </div>
+    <p class="caption reveal" contenteditable="false">입력을 겹치는 조각으로 나눈 뒤 KLUE/RoBERTa와 Attention을 이용해 최종 범주를 출력하도록 구성했음.</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 10 ========== -->
+<section class="slide content-slide">
+  <div class="slide-index">10 · 학습 결과</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">학습 진행 결과</div>
+    <h2 class="title reveal" contenteditable="false">모델 학습 5회 정상 진행 및 최적 체크포인트 저장 완료</h2>
+    <div class="chart-wrap reveal">
+      <svg viewBox="0 0 520 220" role="img" aria-label="학습 회차별 Macro F1 꺾은선그래프">
+        <line x1="40" y1="180" x2="500" y2="180" stroke="#c3c2b7" stroke-width="1"/>
+        <polyline fill="none" stroke="#2a5fd6" stroke-width="2.5"
+          points="70,132 162,92 254,74 346,26 438,58" />
+        <circle cx="70" cy="132" r="5" fill="#2a5fd6"/>
+        <circle cx="162" cy="92" r="5" fill="#2a5fd6"/>
+        <circle cx="254" cy="74" r="5" fill="#2a5fd6"/>
+        <circle cx="346" cy="26" r="7" fill="#0ca30c"/>
+        <circle cx="438" cy="58" r="5" fill="#2a5fd6"/>
+        <text class="line-label" x="70" y="118" text-anchor="middle">0.241</text>
+        <text class="line-label" x="162" y="78" text-anchor="middle">0.373</text>
+        <text class="line-label" x="254" y="60" text-anchor="middle">0.420</text>
+        <text class="line-label" x="346" y="14" text-anchor="middle" fill="#0ca30c">0.490 · 최종 저장</text>
+        <text class="line-label" x="438" y="44" text-anchor="middle">0.456</text>
+        <text class="axis-label" x="70" y="200" text-anchor="middle">1회</text>
+        <text class="axis-label" x="162" y="200" text-anchor="middle">2회</text>
+        <text class="axis-label" x="254" y="200" text-anchor="middle">3회</text>
+        <text class="axis-label" x="346" y="200" text-anchor="middle">4회</text>
+        <text class="axis-label" x="438" y="200" text-anchor="middle">5회</text>
+        <text class="axis-label" x="20" y="184" text-anchor="middle">Macro F1</text>
+      </svg>
+    </div>
+    <p class="caption reveal" contenteditable="false">회차별 학습 로그와 검증 지표가 정상적으로 생성되었으며, 4회차 모델을 최종 체크포인트로 저장했음.</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 11 ========== -->
+<section class="slide content-slide tint">
+  <div class="slide-index">11 · 평가지표</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">검증 지표 산출</div>
+    <h2 class="title reveal" contenteditable="false">검증 지표 정상 산출 및 저장 완료</h2>
+    <div class="stat-row reveal">
+      <div class="stat-tile ok"><div class="num">✓</div><div class="label">정확도 계산 · 92.36%</div></div>
+      <div class="stat-tile ok"><div class="num">✓</div><div class="label">손실(Loss) 계산 · 정상 산출</div></div>
+      <div class="stat-tile ok"><div class="num">✓</div><div class="label">Macro F1 계산 · 0.490</div></div>
+    </div>
+    <p class="caption reveal" contenteditable="false">정확도, 손실과 F1 지표의 계산 기능이 정상 작동했음. 단, 임시 라벨 기준 결과이므로 실제 모델 성능 판단은 불가함.</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 12 ========== -->
+<section class="slide content-slide">
+  <div class="slide-index">12 · 예측 결과 저장</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">예측 결과 저장</div>
+    <h2 class="title reveal" contenteditable="false">검증 데이터 8,521건의 개별 예측 결과를 저장</h2>
+    <div class="record-row reveal">
+      <span class="field-chip">사업 ID</span>
+      <span class="field-chip">기준 라벨</span>
+      <span class="field-chip">예측 범주</span>
+      <span class="field-chip">모델 점수</span>
+    </div>
+    <div class="stat-row reveal" style="max-width:min(60vw,520px)">
+      <div class="stat-tile"><div class="num">8,521건</div><div class="label">검증 데이터 예측 결과</div></div>
+      <div class="stat-tile ok"><div class="num">✓</div><div class="label">valid_predictions.csv 저장 완료</div></div>
+    </div>
+    <p class="caption reveal" contenteditable="false">사업별 기준 라벨, 예측 범주와 모델 점수를 valid_predictions.csv로 정상 출력 완료</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 13 ========== -->
+<section class="slide content-slide tint">
+  <div class="slide-index">13 · 범주별 성능</div>
+  <div class="slide-content">
+    <div class="eyebrow reveal">범주별 평가 · Attention 분석</div>
+    <h2 class="title reveal" contenteditable="false">범주별 평가 및 Attention 분석 결과를 함께 생성</h2>
+    <table class="perf-table reveal">
+      <thead><tr><th>범주</th><th>F1</th><th>검증 건수</th></tr></thead>
+      <tbody>
+        <tr><td><span class="dot" style="background:var(--cat-0)"></span>0 관련없음</td><td class="n">0.968</td><td>8,089</td></tr>
+        <tr><td><span class="dot" style="background:var(--cat-1)"></span>1 보호구역</td><td class="n">0.377</td><td>32</td></tr>
+        <tr><td><span class="dot" style="background:var(--cat-2)"></span>2 생태계 복원</td><td class="n">0.536</td><td>34</td></tr>
+        <tr class="low-n"><td><span class="dot" style="background:var(--cat-3)"></span>3 유전자원</td><td class="n">1.000</td><td>5 <span class="warn-flag">⚠ 표본 부족</span></td></tr>
+        <tr><td><span class="dot" style="background:var(--cat-4)"></span>4 지속가능한 이용</td><td class="n">0.386</td><td>59</td></tr>
+        <tr><td><span class="dot" style="background:var(--cat-5)"></span>5 오염관리</td><td class="n">0.522</td><td>69</td></tr>
+        <tr><td><span class="dot" style="background:var(--cat-6)"></span>6 조사·교육·지식</td><td class="n">0.287</td><td>42</td></tr>
+        <tr><td><span class="dot" style="background:var(--cat-7)"></span>7 녹색경제</td><td class="n">0.574</td><td>100</td></tr>
+        <tr class="low-n"><td><span class="dot" style="background:var(--cat-8)"></span>8 정책·개발계획</td><td class="n">0.000</td><td>3 <span class="warn-flag">⚠ 표본 부족</span></td></tr>
+        <tr><td><span class="dot" style="background:var(--cat-9)"></span>9 기타 관련 활동</td><td class="n">0.249</td><td>88</td></tr>
+      </tbody>
+    </table>
+    <div class="chip-row reveal" style="margin-top: clamp(0.5rem, 1.6vh, 0.9rem);">
+      <span class="chip">✓ 범주별 평가표</span><span class="chip">✓ 혼동행렬</span><span class="chip">✓ 문서 조각별 Attention 가중치</span>
+    </div>
+    <p class="caption reveal" contenteditable="false">범주별 평가표, 혼동행렬과 문서 조각별 Attention 가중치를 분석용 결과물로 저장</p>
+  </div>
+</section>
+
+<!-- ========== SLIDE 14: CLOSING (bookend split panel) ========== -->
+<section class="slide split-slide">
+  <div class="panel-top">
+    <div class="slide-index" style="position:static;margin-bottom:0.6rem;">14 · 결론</div>
+    <div class="eyebrow reveal">파이프라인 검증 결과</div>
+    <h2 class="title reveal" style="font-size:var(--h2-size);" contenteditable="false">전체 파이프라인 정상 작동 확인, 모델 성능은 판단 불가</h2>
+    <p class="sub reveal" contenteditable="false" style="color:var(--text-secondary); opacity:1;">예산자료 입력부터 예측 결과 저장까지 전체 처리 과정의 정상 작동 확인. 실제 성능 평가는 전문가 검증 라벨 구축 후 가능.</p>
+  </div>
+  <div class="panel-bottom">
+    <div class="eyebrow reveal" style="color:rgba(255,255,255,0.85)">다음 단계</div>
+    <ul class="limits-grid reveal" contenteditable="false" style="color:var(--text-light); grid-template-columns: 1fr;">
+      <li>전문가 검증 라벨 구축 필요</li>
+      <li>라벨 불일치 및 희소 범주 보완 필요</li>
+      <li>고정된 시험 데이터를 활용한 재평가 필요</li>
+      <li>사업설명자료가 있는 데이터만 활용하여 테스트 할 예정</li>
+    </ul>
+    <div class="footer-row"><span class="mark">BIOFIN RESEARCH</span><span>14 / 14</span></div>
+  </div>
+</section>
+
+<div class="keyboard-hint">←→ 또는 스와이프로 이동 · E 편집 모드</div>
+
+<script>
+/* ===========================================
+   DOT GRID (slide 8): ~95 grey, ~5 colored
+   =========================================== */
+(function buildDotGrid() {
+  const grid = document.getElementById('dotGrid');
+  const catColors = ['--cat-1','--cat-2','--cat-3','--cat-4','--cat-5'];
+  const hitIndices = new Set([7, 23, 41, 68, 92]);
+  for (let i = 0; i < 100; i++) {
+    const span = document.createElement('span');
+    if (hitIndices.has(i)) {
+      span.classList.add('hit');
+      const color = catColors[[...hitIndices].indexOf(i) % catColors.length];
+      span.style.background = 'var(' + color + ')';
+    }
+    grid.appendChild(span);
+  }
+})();
+
+/* ===========================================
+   SLIDE PRESENTATION CONTROLLER
+   =========================================== */
+class SlidePresentation {
+  constructor() {
+    this.slides = document.querySelectorAll('.slide');
+    this.currentSlide = 0;
+    this.navDotsContainer = document.getElementById('navDots');
+    this.progressBar = document.getElementById('progressBar');
+    this.setupIntersectionObserver();
+    this.setupKeyboardNav();
+    this.setupTouchNav();
+    this.setupWheelNav();
+    this.setupProgressBar();
+    this.setupNavDots();
+  }
+
+  setupIntersectionObserver() {
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting && entry.intersectionRatio > 0.5) {
+          entry.target.classList.add('visible');
+          this.currentSlide = Array.from(this.slides).indexOf(entry.target);
+          this.updateNavDots();
+        }
+      });
+    }, { root: document.body, threshold: 0.5 });
+    this.slides.forEach((slide) => observer.observe(slide));
+  }
+
+  goTo(index) {
+    if (index < 0 || index >= this.slides.length) return;
+    this.slides[index].scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' });
+  }
+
+  setupKeyboardNav() {
+    document.addEventListener('keydown', (e) => {
+      if (e.target.getAttribute('contenteditable') === 'true') return;
+      if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') {
+        e.preventDefault();
+        this.goTo(this.currentSlide + 1);
+      } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+        e.preventDefault();
+        this.goTo(this.currentSlide - 1);
+      }
+    });
+  }
+
+  setupTouchNav() {
+    let touchStartX = 0;
+    document.addEventListener('touchstart', (e) => { touchStartX = e.touches[0].clientX; }, { passive: true });
+    document.addEventListener('touchend', (e) => {
+      const dx = touchStartX - e.changedTouches[0].clientX;
+      if (Math.abs(dx) > 50) this.goTo(this.currentSlide + (dx > 0 ? 1 : -1));
+    }, { passive: true });
+  }
+
+  setupWheelNav() {
+    let wheelLock = false;
+    document.addEventListener('wheel', (e) => {
+      if (wheelLock) return;
+      // Only hijack primarily-vertical wheel gestures (normal mouse wheels).
+      // Primarily-horizontal gestures (trackpad swipe, shift+wheel) scroll natively.
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      if (Math.abs(e.deltaY) < 12) return;
+      e.preventDefault();
+      wheelLock = true;
+      this.goTo(this.currentSlide + (e.deltaY > 0 ? 1 : -1));
+      setTimeout(() => { wheelLock = false; }, 700);
+    }, { passive: false });
+  }
+
+  setupProgressBar() {
+    document.body.addEventListener('scroll', () => {
+      const scrolled = document.body.scrollLeft;
+      const max = document.body.scrollWidth - document.body.clientWidth;
+      this.progressBar.style.width = (max > 0 ? (scrolled / max) * 100 : 0) + '%';
+    }, { passive: true });
+  }
+
+  setupNavDots() {
+    this.navDotsContainer.innerHTML = '';
+    this.slides.forEach((_, i) => {
+      const btn = document.createElement('button');
+      btn.setAttribute('aria-label', 'Slide ' + (i + 1));
+      btn.addEventListener('click', () => this.goTo(i));
+      this.navDotsContainer.appendChild(btn);
+    });
+    this.updateNavDots();
+  }
+
+  updateNavDots() {
+    const dots = this.navDotsContainer.querySelectorAll('button');
+    dots.forEach((dot, i) => dot.classList.toggle('active', i === this.currentSlide));
+  }
+}
+
+/* ===========================================
+   INLINE EDITING (opt-in) — hover hotzone + E key + autosave
+   =========================================== */
+class InlineEditor {
+  constructor() {
+    this.isActive = false;
+    this.storageKey = 'biofin-classification-report:edits:v4';
+    this.editables = Array.from(document.querySelectorAll('[contenteditable]'));
+    this.editToggle = document.getElementById('editToggle');
+    this.editBanner = document.getElementById('editBanner');
+    this.hotzone = document.getElementById('editHotzone');
+    this.restoreFromStorage();
+    this.bindEvents();
+  }
+
+  toggleEditMode() {
+    this.isActive = !this.isActive;
+    document.body.classList.toggle('edit-active', this.isActive);
+    this.editToggle.classList.toggle('active', this.isActive);
+    this.editBanner.classList.toggle('active', this.isActive);
+    this.editables.forEach((el) => el.setAttribute('contenteditable', this.isActive ? 'true' : 'false'));
+    if (!this.isActive) this.saveToStorage();
+  }
+
+  saveToStorage() {
+    const data = {};
+    this.editables.forEach((el, i) => { data[i] = el.innerHTML; });
+    localStorage.setItem(this.storageKey, JSON.stringify(data));
+  }
+
+  restoreFromStorage() {
+    const raw = localStorage.getItem(this.storageKey);
+    if (!raw) return;
+    try {
+      const data = JSON.parse(raw);
+      this.editables.forEach((el, i) => { if (data[i] !== undefined) el.innerHTML = data[i]; });
+    } catch (e) { /* ignore corrupt cache */ }
+  }
+
+  exportFile() {
+    this.editables.forEach((el) => el.removeAttribute('contenteditable'));
+    document.body.classList.remove('edit-active');
+    this.editToggle.classList.remove('active', 'show');
+    this.editBanner.classList.remove('active', 'show');
+
+    const html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+
+    document.body.classList.add('edit-active');
+    this.editables.forEach((el) => el.setAttribute('contenteditable', 'true'));
+    this.editToggle.classList.add('active');
+    this.editBanner.classList.add('active');
+
+    const blob = new Blob([html], { type: 'text/html' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'biofin_classification_report.html';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  bindEvents() {
+    this.editToggle.addEventListener('click', () => this.toggleEditMode());
+    this.hotzone.addEventListener('click', () => this.toggleEditMode());
+
+    let hideTimeout = null;
+    const reveal = () => { clearTimeout(hideTimeout); this.editToggle.classList.add('show'); };
+    const hide = () => { hideTimeout = setTimeout(() => { if (!this.isActive) this.editToggle.classList.remove('show'); }, 400); };
+    this.hotzone.addEventListener('mouseenter', reveal);
+    this.hotzone.addEventListener('mouseleave', hide);
+    this.editToggle.addEventListener('mouseenter', reveal);
+    this.editToggle.addEventListener('mouseleave', hide);
+
+    document.addEventListener('keydown', (e) => {
+      if ((e.key === 'e' || e.key === 'E') && e.target.getAttribute('contenteditable') !== 'true') {
+        this.toggleEditMode();
+      }
+      if (e.ctrlKey && e.key === 's' && this.isActive) {
+        e.preventDefault();
+        this.exportFile();
+      }
+    });
+
+    this.editables.forEach((el) => {
+      el.addEventListener('blur', () => { if (this.isActive) this.saveToStorage(); });
+    });
+  }
+}
+
+new SlidePresentation();
+new InlineEditor();
+</script>
+</body>
+</html>
