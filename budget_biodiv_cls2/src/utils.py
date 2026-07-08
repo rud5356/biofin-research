@@ -56,9 +56,24 @@ def read_csv_flexible(path: str | Path, **kwargs: Any) -> pd.DataFrame:
     """한국 공공데이터에서 흔한 UTF-8/CP949 인코딩을 순서대로 시도한다."""
     path = Path(path)
     last_error: Exception | None = None
+    separator_given = "sep" in kwargs or "delimiter" in kwargs
     for encoding in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
         try:
-            return pd.read_csv(path, encoding=encoding, low_memory=False, **kwargs)
+            read_kwargs = dict(kwargs)
+            if not separator_given:
+                with path.open("r", encoding=encoding, newline="") as handle:
+                    header = handle.readline()
+                # Some public-data files use a .csv extension but are actually
+                # tab-separated. Detect that from the header before pandas sees
+                # commas inside monetary values as extra columns.
+                if header.count("\t") > header.count(","):
+                    read_kwargs["sep"] = "\t"
+            return pd.read_csv(
+                path,
+                encoding=encoding,
+                low_memory=False,
+                **read_kwargs,
+            )
         except UnicodeDecodeError as exc:
             last_error = exc
     raise ValueError(f"CSV 인코딩을 판별할 수 없습니다: {path}") from last_error
