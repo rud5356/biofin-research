@@ -27,6 +27,27 @@ from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 import pandas as pd
 
 try:
+    from .config import (
+        ALLOWED_EXTENSIONS,
+        BASE_DIR,
+        DETAIL_URL,
+        DOWNLOAD_BASE_URL,
+        LIST_API_URL,
+        SAVE_DIR,
+        SITE_URL,
+    )
+except ImportError:
+    from config import (  # type: ignore[no-redef]
+        ALLOWED_EXTENSIONS,
+        BASE_DIR,
+        DETAIL_URL,
+        DOWNLOAD_BASE_URL,
+        LIST_API_URL,
+        SAVE_DIR,
+        SITE_URL,
+    )
+
+try:
     from tqdm.auto import tqdm
 except ImportError:  # 설치 전에도 --help와 오류 로그는 동작하게 한다.
     tqdm = None
@@ -50,14 +71,6 @@ except ImportError:  # main에서 친절한 설치 안내를 출력하기 위한
 
 
 # 기본 경로와 사이트 주소는 CLI에서 덮어쓸 수 있게 상수로 분리했다.
-BASE_DIR = Path(r"C:\repos\biofin-research\budget_biodiv_cls2\outputs")
-SAVE_DIR = BASE_DIR / "사업설명자료"
-SITE_URL = "https://www.openfiscaldata.go.kr/op/ko/bs/UOPKOBSA02"
-LIST_API_URL = "https://www.openfiscaldata.go.kr/op/ko/bs/cls/selectSactvSearchList.do"
-DETAIL_URL = "https://www.openfiscaldata.go.kr/op/ko/bs/cls/UOPKOBSZ01"
-DOWNLOAD_BASE_URL = "https://www.openfiscaldata.go.kr/op/ko/cm/downloadFileSayBrkd.do"
-ALLOWED_EXTENSIONS = {".hwp", ".hwpx", ".pdf", ".zip", ".xlsx"}
-
 SUCCESS_COLUMNS = [
     "year",
     "source_file",
@@ -89,6 +102,33 @@ TARGET_COLUMNS = [
     "program_name",
     "unit_name",
     "activity_name",
+]
+
+YEAR_OUTPUT_COLUMNS = [
+    "회계연도",
+    "소관명",
+    "회계명",
+    "분야명",
+    "부문명",
+    "프로그램명",
+    "단위사업명",
+    "세부사업명",
+    "예산액",
+    "business_key",
+    "사업설명자료_파일명",
+    "사업설명자료_상대경로",
+    "다운로드상태",
+    "오류내용",
+]
+
+YEAR_FAILED_COLUMNS = [
+    "business_key",
+    "year",
+    "ministry",
+    "activity_name",
+    "reason",
+    "source_url",
+    "failed_at",
 ]
 
 # 실제 데이터의 한글명과 열린재정 영문 필드명을 모두 허용한다.
@@ -905,6 +945,11 @@ def _destination_path(save_dir: Path, target: dict[str, Any], original_name: str
             _safe_component(target.get("year"), 4),
             _safe_component(target.get("ministry") or "부처미상", 45),
             _safe_component(target.get("activity_name"), 75),
+            *(
+                [_safe_component(target.get("business_key"), 70)]
+                if target.get("business_key")
+                else []
+            ),
             original,
         ]
     )
@@ -923,7 +968,7 @@ async def _save_playwright_download(
     if extension not in ALLOWED_EXTENSIONS:
         raise ValueError(f"지원하지 않는 다운로드 확장자: {extension or '없음'}")
     destination = _destination_path(save_dir, target, original_name)
-    if destination.exists():
+    if destination.exists() and not target.get("_overwrite"):
         await download.cancel()
         return destination
     await download.save_as(str(destination))
@@ -970,7 +1015,7 @@ async def _download_url(
             return None, f"지원 파일 형식 아님({headers.get('content-type', '')})"
 
         destination = _destination_path(save_dir, target, original_name)
-        if destination.exists():
+        if destination.exists() and not target.get("_overwrite"):
             return destination, "이미 존재하여 건너뜀"
         destination.write_bytes(await response.body())
         return destination, "다운로드 완료"
@@ -1004,7 +1049,7 @@ async def _save_response_download(
         if Path(original_name).suffix.lower() not in ALLOWED_EXTENSIONS:
             return None, f"다운로드 응답 형식 판별 실패({content_type})"
         destination = _destination_path(save_dir, target, original_name)
-        if destination.exists():
+        if destination.exists() and not target.get("_overwrite"):
             return destination, "이미 존재하여 건너뜀"
         destination.write_bytes(await response.body())
         return destination, "다운로드 완료"
@@ -1573,6 +1618,327 @@ async def crawl_one_year(
 # ---------------------------------------------------------------------------
 # 로그 저장과 CLI 진입점
 # ---------------------------------------------------------------------------
+def _record_code(record: dict[str, Any], name: str) -> str:
+    return _clean_value(record.get(name))
+
+
+def _year_business_key(year: int, record: dict[str, Any]) -> str:
+    # 기존 실행 결과와 이어받기 호환성을 유지하는 기본 키다. 동일 기본 키가
+    # 여러 행에 쓰인 경우에만 수집 단계에서 acctCd를 접미사로 추가한다.
+    code_names = ("offcCd", "acntCd", "fldCd", "sectCd", "pgmCd", "actvCd", "sayCd")
+    parts = [str(year), *(_record_code(record, name) or "NA" for name in code_names)]
+    return "-".join(parts)
+
+
+def _candidate_business_key(year: int, candidate: dict[str, Any]) -> str:
+    return _clean_value(candidate.get("_business_key")) or _year_business_key(
+        year, candidate.get("record") or {}
+    )
+
+
+def _year_business_row(year: int, candidate: dict[str, Any]) -> dict[str, Any]:
+    record = candidate.get("record") or {}
+    has_document = bool(_clean_value(candidate.get("file_name")))
+    return {
+        "business_key": _candidate_business_key(year, candidate),
+        "year": year,
+        "ministry_code": _record_code(record, "offcCd"),
+        "ministry": candidate.get("ministry", ""),
+        "account_code": _record_code(record, "acntCd"),
+        "account_name": candidate.get("account", ""),
+        "field_code": _record_code(record, "fldCd"),
+        "field_name": candidate.get("field", ""),
+        "sector_code": _record_code(record, "sectCd"),
+        "sector_name": candidate.get("sector", ""),
+        "program_code": _record_code(record, "pgmCd"),
+        "program_name": candidate.get("program", ""),
+        "unit_code": _record_code(record, "actvCd"),
+        "unit_name": candidate.get("unit", ""),
+        "activity_code": _record_code(record, "sayCd"),
+        "activity_name": candidate.get("activity", ""),
+        "budget_amount": record.get("thyCfmtnMediAmt", ""),
+        "site_filename": candidate.get("file_name", ""),
+        "detail_url": candidate.get("href", ""),
+        "expected_download_url": candidate.get("download_url", ""),
+        "document_count": 0,
+        "download_status": "pending" if has_document else "no_document",
+        "error": "",
+        "crawled_at": _now(),
+    }
+
+
+def _read_csv_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        return pd.read_csv(path, dtype=str, keep_default_na=False).to_dict("records")
+    except Exception as exc:
+        LOGGER.warning("기존 CSV 읽기 실패(%s): %s", path, exc)
+        return []
+
+
+def _write_year_outputs(
+    year_dir: Path,
+    year: int,
+    businesses: list[dict[str, Any]],
+    documents: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+) -> None:
+    year_dir.mkdir(parents=True, exist_ok=True)
+    documents_by_key: dict[str, list[dict[str, Any]]] = {}
+    for document in documents:
+        documents_by_key.setdefault(_clean_value(document.get("business_key")), []).append(
+            document
+        )
+
+    combined_rows: list[dict[str, Any]] = []
+    for business in businesses:
+        matches = documents_by_key.get(business["business_key"]) or [None]
+        for document in matches:
+            combined_rows.append(
+                {
+                    "회계연도": business["year"],
+                    "소관명": business["ministry"],
+                    "회계명": business["account_name"],
+                    "분야명": business["field_name"],
+                    "부문명": business["sector_name"],
+                    "프로그램명": business["program_name"],
+                    "단위사업명": business["unit_name"],
+                    "세부사업명": business["activity_name"],
+                    "예산액": business["budget_amount"],
+                    "business_key": business["business_key"],
+                    "사업설명자료_파일명": (
+                        document.get("saved_filename", "") if document else ""
+                    ),
+                    "사업설명자료_상대경로": (
+                        document.get("relative_path", "") if document else ""
+                    ),
+                    "다운로드상태": (
+                        document.get("download_status", "")
+                        if document
+                        else business["download_status"]
+                    ),
+                    "오류내용": (
+                        document.get("error", "")
+                        if document
+                        else business["error"]
+                    ),
+                }
+            )
+
+    outputs = [
+        (
+            pd.DataFrame(combined_rows).reindex(columns=YEAR_OUTPUT_COLUMNS),
+            year_dir / f"open_fiscal_{year}.csv",
+        ),
+        (
+            pd.DataFrame(failures).reindex(columns=YEAR_FAILED_COLUMNS),
+            year_dir / f"open_fiscal_{year}_failed.csv",
+        ),
+    ]
+    for frame, path in outputs:
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        frame.to_csv(temp_path, index=False, encoding="utf-8-sig")
+        temp_path.replace(path)
+
+
+async def crawl_complete_year(
+    page: Page,
+    year: int,
+    output_root: Path,
+    limit: int | None,
+    *,
+    list_only: bool,
+    overwrite: bool,
+    retry_failed: bool,
+) -> tuple[int, int]:
+    """열린재정의 한 회계연도 전체 목록과 첨부파일 매칭 CSV를 만든다."""
+
+    year_dir = output_root / str(year)
+    document_dir = year_dir / "사업설명자료"
+    document_dir.mkdir(parents=True, exist_ok=True)
+
+    candidates = await _fetch_year_candidates(page, year, None)
+    candidates_by_base_key: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        base_key = _year_business_key(year, candidate.get("record") or {})
+        candidates_by_base_key.setdefault(base_key, []).append(candidate)
+
+    assigned_keys: set[str] = set()
+    for base_key, grouped_candidates in candidates_by_base_key.items():
+        for occurrence, candidate in enumerate(grouped_candidates, start=1):
+            if len(grouped_candidates) == 1:
+                key = base_key
+            else:
+                account_detail = _record_code(
+                    candidate.get("record") or {}, "acctCd"
+                ) or f"ROW{occurrence}"
+                key = f"{base_key}-{account_detail}"
+                if key in assigned_keys:
+                    key = f"{key}-{occurrence}"
+            candidate["_business_key"] = key
+            assigned_keys.add(key)
+
+    if limit not in (None, 0):
+        candidates = candidates[:limit]
+
+    businesses = [_year_business_row(year, candidate) for candidate in candidates]
+    business_by_key = {row["business_key"]: row for row in businesses}
+
+    combined_path = year_dir / f"open_fiscal_{year}.csv"
+    failures_path = year_dir / f"open_fiscal_{year}_failed.csv"
+    documents = [
+        {
+            "business_key": row.get("business_key", ""),
+            "saved_filename": row.get("사업설명자료_파일명", ""),
+            "relative_path": row.get("사업설명자료_상대경로", ""),
+            "download_status": row.get("다운로드상태", ""),
+            "error": row.get("오류내용", ""),
+        }
+        for row in _read_csv_records(combined_path)
+        if row.get("사업설명자료_파일명")
+    ]
+    failures_by_key = {
+        row.get("business_key", ""): row
+        for row in _read_csv_records(failures_path)
+        if row.get("business_key")
+    }
+    successful_keys: set[str] = set()
+    for row in documents:
+        relative_path = _clean_value(row.get("relative_path"))
+        if (
+            row.get("download_status") == "success"
+            and relative_path
+            and (year_dir / relative_path).exists()
+        ):
+            successful_keys.add(_clean_value(row.get("business_key")))
+
+    for business in businesses:
+        business_key = business["business_key"]
+        if business_key in successful_keys:
+            business["download_status"] = "success"
+            business["document_count"] = sum(
+                _clean_value(row.get("business_key")) == business_key
+                and row.get("download_status") == "success"
+                for row in documents
+            )
+        elif business_key in failures_by_key:
+            business["download_status"] = "failed"
+            business["error"] = failures_by_key[business_key].get("reason", "")
+
+    LOGGER.info(
+        "%s년 열린재정 사업 %d건 수집 완료%s",
+        year,
+        len(businesses),
+        " (목록만 저장)" if list_only else "",
+    )
+    _write_year_outputs(
+        year_dir, year, businesses, documents, list(failures_by_key.values())
+    )
+    if list_only:
+        return len(businesses), 0
+
+    for index, candidate in enumerate(candidates, start=1):
+        business_key = _candidate_business_key(year, candidate)
+        business = business_by_key[business_key]
+        if not _clean_value(candidate.get("file_name")):
+            business["download_status"] = "no_document"
+            business["document_count"] = 0
+            business["error"] = ""
+            failures_by_key.pop(business_key, None)
+            continue
+        if retry_failed and business_key not in failures_by_key:
+            business["download_status"] = (
+                "success" if business_key in successful_keys else "skipped"
+            )
+            continue
+        if not overwrite and business_key in successful_keys:
+            business["download_status"] = "success"
+            business["document_count"] = sum(
+                _clean_value(row.get("business_key")) == business_key
+                and row.get("download_status") == "success"
+                for row in documents
+            )
+            continue
+
+        target = {
+            "business_key": business_key,
+            "year": year,
+            "ministry": business["ministry"],
+            "program_name": business["program_name"],
+            "activity_name": business["activity_name"],
+            "_overwrite": overwrite,
+            "_candidate": candidate,
+            "_search_url": candidate.get("listing_url") or _year_url(year),
+        }
+        result = await download_business_doc(page, target, document_dir)
+        now = _now()
+        if result["ok"]:
+            documents = [
+                row
+                for row in documents
+                if _clean_value(row.get("business_key")) != business_key
+            ]
+            for document_index, downloaded_file in enumerate(result["files"], start=1):
+                path = Path(downloaded_file)
+                documents.append(
+                    {
+                        "business_key": business_key,
+                        "year": year,
+                        "ministry": business["ministry"],
+                        "activity_name": business["activity_name"],
+                        "document_index": document_index,
+                        "original_filename": candidate.get("file_name", ""),
+                        "saved_filename": path.name,
+                        "relative_path": path.relative_to(year_dir).as_posix(),
+                        "file_extension": path.suffix.lower(),
+                        "file_size": path.stat().st_size if path.exists() else "",
+                        "source_url": result.get("source_url", ""),
+                        "download_status": "success",
+                        "error": result.get("reason", ""),
+                        "downloaded_at": now,
+                    }
+                )
+            business["document_count"] = len(result["files"])
+            business["download_status"] = "success"
+            business["error"] = result.get("reason", "")
+            failures_by_key.pop(business_key, None)
+        else:
+            business["download_status"] = "failed"
+            business["error"] = result.get("reason", "")
+            failures_by_key[business_key] = {
+                "business_key": business_key,
+                "year": year,
+                "ministry": business["ministry"],
+                "activity_name": business["activity_name"],
+                "reason": result.get("reason", ""),
+                "source_url": result.get("source_url", ""),
+                "failed_at": now,
+            }
+
+        LOGGER.info(
+            "[%d/%d] %s: %s",
+            index,
+            len(candidates),
+            business["download_status"],
+            business["activity_name"],
+        )
+        if index % 10 == 0 or index == len(candidates):
+            _write_year_outputs(
+                year_dir,
+                year,
+                businesses,
+                documents,
+                list(failures_by_key.values()),
+            )
+        await asyncio.sleep(random.uniform(RUNTIME.min_delay, RUNTIME.max_delay))
+
+    _write_year_outputs(
+        year_dir, year, businesses, documents, list(failures_by_key.values())
+    )
+    return len(businesses), len(failures_by_key)
+
+
 def save_logs(
     success_rows: list[dict],
     failed_rows: list[dict],
@@ -1620,6 +1986,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--headed", action="store_true", help="Chromium 창을 표시")
     parser.add_argument("--dry-run", action="store_true", help="매칭만 확인하고 다운로드하지 않음")
     parser.add_argument("--multi-only", action="store_true", help="다중 후보(2건 이상 매칭)인 사업만 처리")
+    parser.add_argument("--list-only", action="store_true", help="사업 목록 CSV만 생성")
+    parser.add_argument("--overwrite", action="store_true", help="기존 정상 문서도 다시 다운로드")
+    parser.add_argument("--retry-failed", action="store_true", help="기존 실패 사업만 다시 처리")
     parser.add_argument(
         "--limit",
         type=int,
@@ -1630,6 +1999,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-delay", type=float, default=2.0, help="사업별 최대 대기(초)")
     parser.add_argument("--base-dir", type=Path, default=BASE_DIR, help="입력 파일 폴더")
     parser.add_argument("--save-dir", type=Path, default=SAVE_DIR, help="다운로드/로그 폴더")
+    parser.add_argument(
+        "--browser-channel",
+        default="chrome",
+        help="Playwright 브라우저 채널(기본 chrome, 내장 Chromium은 빈 문자열)",
+    )
     return parser.parse_args()
 
 
@@ -1642,7 +2016,7 @@ async def main() -> int:
         raise SystemExit("--timeout은 1 이상이어야 합니다.")
     if args.min_delay < 0 or args.max_delay < args.min_delay:
         raise SystemExit("대기시간은 0 이상이고 max-delay >= min-delay 여야 합니다.")
-    if args.limit is not None and args.limit <= 0:
+    if args.limit is not None and args.limit < 0:
         raise SystemExit("--limit은 1 이상이어야 합니다.")
     RUNTIME = RuntimeConfig(
         timeout_ms=args.timeout,
@@ -1653,10 +2027,48 @@ async def main() -> int:
     )
 
     args.save_dir.mkdir(parents=True, exist_ok=True)
+    if args.year is not None:
+        if async_playwright is None:
+            LOGGER.error("필수 패키지 미설치: playwright")
+            return 2
+        try:
+            async with async_playwright() as playwright:
+                launch_options: dict[str, Any] = {"headless": not args.headed}
+                if args.browser_channel:
+                    launch_options["channel"] = args.browser_channel
+                browser = await playwright.chromium.launch(**launch_options)
+                context = await browser.new_context(
+                    accept_downloads=True,
+                    locale="ko-KR",
+                )
+                page = await context.new_page()
+                page.set_default_timeout(args.timeout)
+                page.set_default_navigation_timeout(args.timeout)
+                business_count, failure_count = await crawl_complete_year(
+                    page,
+                    args.year,
+                    args.save_dir,
+                    args.limit,
+                    list_only=args.list_only or args.dry_run,
+                    overwrite=args.overwrite,
+                    retry_failed=args.retry_failed,
+                )
+                await context.close()
+                await browser.close()
+            LOGGER.info(
+                "%s년 전체 수집 완료: 사업 %d건, 실패 %d건, 저장 위치 %s",
+                args.year,
+                business_count,
+                failure_count,
+                args.save_dir / str(args.year),
+            )
+            return 0 if failure_count == 0 else 1
+        except Exception as exc:
+            LOGGER.exception("%s년 전체 수집 실패: %s", args.year, exc)
+            return 2
+
     targets = build_targets(args.base_dir)
-    if args.year is not None and not targets.empty:
-        targets = targets[targets["year"] == args.year].copy()
-    if args.limit is not None and not targets.empty:
+    if args.limit not in (None, 0) and not targets.empty:
         targets = targets.head(args.limit).copy()
 
     success_rows: list[dict[str, Any]] = []
