@@ -516,6 +516,10 @@ def _candidate_from_record(
     file_name = _dict_value(record, ["sayBrkdFileNm", "fileName"])
     file_stem = Path(file_name).stem if file_name else ""
     display_name = f"{_dict_value(record, COLUMN_CANDIDATES['ministry'])}_{activity}"
+    # 이 값은 URL의 단일 경로 세그먼트로 사용된다. 사업명의 슬래시를 그대로
+    # 인코딩하면 서버가 %2F를 경로 구분자로 해석해 HWP 대신 오류 HTML을
+    # 반환하므로, 열린재정 파일명 규칙과 동일하게 밑줄로 치환한다.
+    display_name = re.sub(r"[\\/]", "_", display_name)
     download_url = (
         f"{DOWNLOAD_BASE_URL}/{quote(str(expected_year), safe='')}"
         f"/{quote(display_name, safe='')}/{quote(file_stem, safe='')}"

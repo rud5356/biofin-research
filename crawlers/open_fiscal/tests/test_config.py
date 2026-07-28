@@ -91,6 +91,29 @@ class OpenFiscalConfigTest(unittest.TestCase):
             self.assertEqual(frame.loc[0, "다운로드상태"], "no_document")
             self.assertTrue(pd.isna(frame.loc[0, "사업설명자료_파일명"]))
 
+    def test_download_url_replaces_slash_in_business_name(self) -> None:
+        record = {
+            "acntYr": "2024",
+            "offcCd": "034",
+            "offcNm": "환경부",
+            "acntCd": "220",
+            "acctCd": "00",
+            "fldCd": "070",
+            "sectCd": "077",
+            "pgmCd": "2000",
+            "actvCd": "2038",
+            "actvNm": "단위사업",
+            "sayCd": "339",
+            "sayNm": "수자원/수재해 위성 개발(R&D)",
+            "sayBrkdFileNm": "2024034220000772038339.hwp",
+        }
+        candidate = _candidate_from_record(record, config.LIST_API_URL, 2024)
+        self.assertIsNotNone(candidate)
+        download_url = (candidate or {})["download_url"]
+        middle_segment = download_url.rsplit("/", 2)[-2]
+        self.assertNotIn("%2F", middle_segment.upper())
+        self.assertIn("_", middle_segment)
+
     def test_combined_csv_keeps_budget_columns_and_document_path(self) -> None:
         business = {
             "business_key": "2024-key",
