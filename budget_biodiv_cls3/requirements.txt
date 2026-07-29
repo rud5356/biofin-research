@@ -1,0 +1,12 @@
+pandas
+numpy
+scikit-learn
+torch
+transformers
+accelerate
+tqdm
+pypdf
+pdfplumber
+olefile
+beautifulsoup4
+lxml

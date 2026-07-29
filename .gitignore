@@ -13,6 +13,7 @@ __pycache__/
 *.bin
 *.h5
 *.tar
+*.tar.gz
 
 # 대용량 디렉토리
 **/data/
@@ -30,3 +31,6 @@ __pycache__/
 
 # 열린재정 HWP 원본 데이터
 국가생물다양성_열린재정 데이터/**/*.hwp
+
+# budget_biodiv_cls3 원본 사업설명자료 (HWP/HWPX, 재생성 가능)
+budget_biodiv_cls3/document/2023/사업설명자료/

@@ -11,6 +11,7 @@
 |------|------|
 | `budget_biodiv_cls` | 재정자료 생물다양성 관련 여부 이진 분류 (Ollama LLM + KoBERT) |
 | `budget_biodiv_cls2` | `budget_biodiv_cls` 2세대 — BIOFIN 9대 분류 기준 프롬프트(v1~v4) + 해시 캐시 기반 라벨링 |
+| `budget_biodiv_cls3` | 예산 CSV + 사업설명자료 전체 본문 결합 — BIOFIN 1차 카테고리(0~9) Transformer(Attention Pooling) 분류 |
 | `budget_field_cls` | 재정자료 분야별 다중 분류 — HWP/PDF 문서를 16개 예산 분야로 분류 (KoBERT, Docker 지원) |
 | `biodiversity_rag` | 생물다양성 논문 초록 기반 RAG 질의응답 시스템 |
 | `budget_matcher` | 예산 CSV와 열린재정 파일 폴더 매칭 |
@@ -56,6 +57,27 @@ python apply_cache_labels.py                                    # 캐시를 다�
 
 - Ollama 로컬 서버(`llama3.1:8b` 권장) 필요
 - 자세한 내용은 [budget_biodiv_cls2/README.md](budget_biodiv_cls2/README.md) 참조
+
+---
+
+## budget_biodiv_cls3
+
+`budget_biodiv_cls2`와 달리 예산 CSV 메타데이터뿐 아니라 매칭된 사업설명자료(HWP) 전체
+본문을 함께 사용해 BIOFIN 1차 카테고리(0~9)를 Transformer로 분류합니다. 긴 문서는 512
+token chunk로 나눠 Attention Pooling으로 문서 단위 분류를 수행합니다.
+
+```powershell
+cd budget_biodiv_cls3
+python src/train_attention_classifier.py --document_only --class_weight   # 학습
+python src/predict_attention_classifier_v2.py `
+  --model_dir outputs/model_results `
+  --doc_dir document/2023/사업설명자료 `
+  --budget_file document/2023biofin_label.csv `
+  --output_dir outputs/predictions `
+  --no-heatmap                                                            # 새 CSV 분류
+```
+
+자세한 내용은 [budget_biodiv_cls3/README.md](budget_biodiv_cls3/README.md) 참조.
 
 ---
 
