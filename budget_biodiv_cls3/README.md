@@ -70,26 +70,30 @@ python transformer/src/predict_attention_classifier.py `
 
 ## Ollama LLM으로 0~9 분류
 
-`llm/classify_biofin_category_with_ollama.py`는 `cls2`의 캐시 기반 LLM
+`llm/v1/classify_biofin_category_with_ollama.py`는 `cls2`의 캐시 기반 LLM
 분류 흐름을 참고한 BIOFIN 1차 카테고리(0~9) 분류 스크립트입니다.
-`llm/clip_20260724142552447 (1).bmp`의 BIOFIN/GLOBE 분류 기준이
+`llm/v2/classify_biofin_subcategory_with_ollama.py`는 BIOFIN 하위 코드로
+분류합니다.
+각 버전 폴더의 `clip_20260724142552447 (1).bmp` BIOFIN/GLOBE 분류 기준이
 `SYSTEM_PROMPT`에 반영돼 있습니다.
 
 ```powershell
 # 입력 구조만 확인
-python llm/classify_biofin_category_with_ollama.py --dry-run
+python llm/v1/classify_biofin_category_with_ollama.py --dry-run
 
 # 10개 고유 사업만 시험 분류
-python llm/classify_biofin_category_with_ollama.py --limit-keys 10
+python llm/v1/classify_biofin_category_with_ollama.py --limit-keys 10
 
 # 전체 분류
-python llm/classify_biofin_category_with_ollama.py
+python llm/v1/classify_biofin_category_with_ollama.py
 ```
 
-기본 입력은 `document/2023biofin_label_matched.csv`, 기본 출력은
-`outputs/llm/2023biofin_label_matched_llm_classified.csv`입니다.
+기본 입력은 `document/2023biofin_label_matched.csv`, v1 기본 출력은
+`outputs/llm/v1/2023biofin_label_matched_llm_classified.csv`입니다.
 출력에는 `LLM BIOFIN 1차 카테고리`, `confidence`, `reason`,
 `evidence` 컬럼이 추가됩니다. 중단 후 재실행하면
-`outputs/llm/category_label_cache.csv`를 재사용합니다.
+`outputs/llm/v1/category_label_cache.csv`를 재사용합니다.
 원본 `BIOFIN 1차 카테고리` 정답이 있으면 `evaluation_metrics.json`,
 `confusion_matrix.csv`, `incorrect_predictions.csv`도 자동 생성합니다.
+LLM v1과 v2 모두 매칭된 사업설명자료 본문을 사업 메타데이터와 함께
+프롬프트에 사용합니다.

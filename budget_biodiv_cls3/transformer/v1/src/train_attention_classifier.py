@@ -7,7 +7,7 @@
 
 데이터 점검은 pretrained model을 내려받지 않는다::
 
-    python transformer/src/train_attention_classifier.py --dry_run
+    python transformer/v1/src/train_attention_classifier.py --dry_run
 """
 
 from __future__ import annotations
@@ -37,11 +37,11 @@ from document_parser import DocumentParseError, extract_document
 from utils import configure_logging, ensure_dir, is_cuda_oom, set_seed, write_csv, write_json
 
 
-PROJECT_DIR = Path(__file__).resolve().parents[2]
+PROJECT_DIR = Path(__file__).resolve().parents[3]
 DEFAULT_BASE_DIR = PROJECT_DIR / "document"
 DEFAULT_DOC_DIR = DEFAULT_BASE_DIR / "2023" / "사업설명자료"
 DEFAULT_LABEL_FILE = DEFAULT_BASE_DIR / "2023biofin_label.csv"
-DEFAULT_OUTPUT_DIR = PROJECT_DIR / "outputs" / "model_results"
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "model_results"
 LOGGER = logging.getLogger("budget_document_classifier")
 
 
@@ -78,6 +78,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--class_weight", action="store_true", help="train 분포 역비례 class weight 적용")
+    parser.add_argument(
+        "--undersample_majority",
+        action="store_true",
+        help="split 후 train 세트의 majority label만 동적으로 언더샘플링",
+    )
+    parser.add_argument("--majority_label", type=int, default=0)
+    parser.add_argument("--majority_cap_multiplier", type=float, default=10.0)
+    parser.add_argument("--majority_cap_min", type=int, default=1000)
     parser.add_argument(
         "--balanced_sampling",
         action="store_true",
@@ -124,6 +132,10 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("num_labels는 2 이상이어야 합니다")
     if args.samples_per_class < 1:
         raise ValueError("samples_per_class는 1 이상이어야 합니다")
+    if args.majority_cap_multiplier <= 0:
+        raise ValueError("majority_cap_multiplier는 0보다 커야 합니다")
+    if args.majority_cap_min < 1:
+        raise ValueError("majority_cap_min은 1 이상이어야 합니다")
 
 
 def save_match_outputs(
@@ -551,6 +563,72 @@ def make_class_weights(records: list[dict[str, Any]], device: Any, num_labels: i
     return torch.tensor(weights, dtype=torch.float32, device=device)
 
 
+def undersample_majority_records(
+    records: list[dict[str, Any]],
+    majority_label: int,
+    cap_multiplier: float,
+    cap_min: int,
+    seed: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """소수 클래스 중앙값을 기준으로 train의 지정 다수 클래스만 줄인다."""
+    indices_by_label: dict[int, list[int]] = {}
+    for index, record in enumerate(records):
+        indices_by_label.setdefault(int(record["label"]), []).append(index)
+
+    majority_indices = indices_by_label.get(majority_label, [])
+    minority_counts = [
+        len(indices)
+        for label, indices in indices_by_label.items()
+        if label != majority_label
+    ]
+    if not majority_indices or not minority_counts:
+        LOGGER.warning("majority undersampling을 적용할 클래스 분포가 충분하지 않습니다.")
+        return records, {"applied": False, "reason": "insufficient_class_distribution"}
+
+    minority_median = float(np.median(minority_counts))
+    requested_cap = max(cap_min, int(round(minority_median * cap_multiplier)))
+    applied_cap = min(len(majority_indices), requested_cap)
+    if applied_cap == len(majority_indices):
+        LOGGER.info(
+            "majority label %d는 %d건으로 cap %d 이하이므로 줄이지 않습니다.",
+            majority_label,
+            len(majority_indices),
+            requested_cap,
+        )
+        return records, {
+            "applied": False,
+            "reason": "already_below_cap",
+            "minority_median": minority_median,
+            "requested_cap": requested_cap,
+        }
+
+    rng = np.random.default_rng(seed)
+    kept_majority = set(
+        int(index)
+        for index in rng.choice(majority_indices, size=applied_cap, replace=False)
+    )
+    sampled = [
+        record
+        for index, record in enumerate(records)
+        if int(record["label"]) != majority_label or index in kept_majority
+    ]
+    rng.shuffle(sampled)
+    summary = {
+        "applied": True,
+        "majority_label": majority_label,
+        "majority_before": len(majority_indices),
+        "majority_after": applied_cap,
+        "minority_median": minority_median,
+        "cap_multiplier": cap_multiplier,
+        "cap_min": cap_min,
+        "requested_cap": requested_cap,
+        "train_before": len(records),
+        "train_after": len(sampled),
+    }
+    LOGGER.info("majority undersampling: %s", summary)
+    return sampled, summary
+
+
 def make_balanced_sampler(
     records: list[dict[str, Any]], samples_per_class: int, seed: int
 ):
@@ -626,6 +704,18 @@ def train(args: argparse.Namespace, records: list[dict[str, Any]], output_dir: P
         len(test_records),
     )
     save_split_outputs(train_records, valid_records, test_records, output_dir)
+    if args.undersample_majority:
+        train_records, undersampling_summary = undersample_majority_records(
+            train_records,
+            args.majority_label,
+            args.majority_cap_multiplier,
+            args.majority_cap_min,
+            args.seed,
+        )
+        write_json(
+            undersampling_summary,
+            output_dir / "train_undersampling_summary.json",
+        )
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     train_dataset = BudgetDocumentDataset(
         train_records, tokenizer, max_length=args.max_length, stride=args.stride

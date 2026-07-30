@@ -1,29 +1,44 @@
 # LLM 분류기
 
-Ollama 로컬 LLM으로 예산 사업을 BIOFIN 1차 카테고리 0~9로 분류합니다.
-`clip_20260724142552447 (1).bmp`의 BIOFIN/GLOBE 분류표를 해석한 기준이
-`classify_biofin_category_with_ollama.py`의 `SYSTEM_PROMPT`에 반영돼
-있습니다.
+- `v1`: BIOFIN 1차 상위 카테고리 0~9 분류
+- `v2`: BIOFIN 하위 카테고리 코드 분류
 
 프로젝트 루트에서 실행합니다.
 
-```powershell
-python llm/classify_biofin_category_with_ollama.py --dry-run
-python llm/classify_biofin_category_with_ollama.py --limit-keys 10
+```bash
+python llm/v1/classify_biofin_category_with_ollama.py --dry-run
+python llm/v2/classify_biofin_subcategory_with_ollama.py --dry-run
 ```
 
-데이터는 프로젝트 루트의 `document/`, 결과와 캐시는 `outputs/llm/`을
-기본 경로로 사용합니다.
+결과와 캐시는 각각 `outputs/llm/v1/`, `outputs/llm/v2/`에 저장됩니다.
 
-분류가 완료될 때마다 `category_label_cache.csv`를 원자적으로 저장합니다.
-중단 후 같은 `--output-dir`, `--cache-csv`, `--model` 설정으로 다시
-실행하면 캐시에 있는 완료 사업은 건너뛰고 나머지부터 이어서 처리합니다.
+두 버전 모두 CSV의 `사업설명자료_상대경로` 또는
+`사업설명자료_파일명`으로 HWP/HWPX/PDF/TXT 본문을 찾아 사업명과 함께
+LLM 프롬프트에 넣습니다. 최종 CSV의 `document_status`가 `PARSED`이면
+본문을 정상적으로 사용한 것입니다.
 
-입력에 `BIOFIN 1차 카테고리` 정답 컬럼이 있으면 분류 완료 후 자동으로
-정확도를 평가합니다.
+## Docker
 
-- `evaluation_metrics.json`: 정확도, macro precision/recall/F1 및 클래스별 지표
-- `confusion_matrix.csv`: 정답 0~9 × 예측 0~9 혼동행렬
-- `incorrect_predictions.csv`: 정답과 예측이 다른 사업 목록
+문서 파싱 라이브러리가 포함된 이미지를 프로젝트 루트에서 한 번 빌드합니다.
 
-정답 컬럼명이 다르면 `--gold-label-col "컬럼명"`으로 지정합니다.
+```bash
+docker build -f llm/Dockerfile -t biofin-llm .
+```
+
+v2 실행 예:
+
+```bash
+docker run --rm -it \
+  --network host \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  biofin-llm \
+  llm/v2/classify_biofin_subcategory_with_ollama.py \
+  --ollama-url http://172.22.0.1:20001 \
+  --model gemma3:12b
+```
+
+기본적으로 본문은 앞·뒤를 합쳐 최대 16,000자까지 사용하고 Ollama
+컨텍스트는 16,384 token으로 요청합니다. 각각 `--max-document-chars`,
+`--num-ctx`로 변경할 수 있습니다.

@@ -6,6 +6,7 @@ import logging
 import re
 import unicodedata
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -124,11 +125,33 @@ def _fallback_label_files(label_file: Path) -> list[Path]:
     )
 
 
+def normalize_label_code(value: Any) -> str:
+    """0.0/2.040 같은 값을 0/2.04 형태의 안정적인 분류 코드로 바꾼다."""
+    if value is None or pd.isna(value) or str(value).strip() == "":
+        return ""
+    text = str(value).strip()
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return text
+    if number == number.to_integral():
+        return str(int(number))
+    return format(number.normalize(), "f")
+
+
+def _label_sort_key(code: str) -> tuple[int, Decimal | str]:
+    try:
+        return (0, Decimal(code))
+    except InvalidOperation:
+        return (1, code)
+
+
 def load_label_data(
     label_file: str | Path,
-    label_column: str = "biofin_category",
-    num_labels: int = 10,
-) -> tuple[pd.DataFrame, list[Path]]:
+    label_column: str = "하위 카테고리",
+    num_labels: int | None = None,
+    label_mapping: dict[str, int] | None = None,
+) -> tuple[pd.DataFrame, list[Path], dict[str, int]]:
     label_file = Path(label_file)
     files = [label_file] if label_file.is_file() else _fallback_label_files(label_file)
     if not files:
@@ -151,30 +174,46 @@ def load_label_data(
         raise ValueError(f"필수 컬럼이 없습니다: {', '.join(missing)}")
 
     labels["_year"] = pd.to_numeric(labels["회계연도"], errors="coerce").astype("Int64")
-    numeric_label = pd.to_numeric(labels[label_column], errors="coerce")
-    is_integer = numeric_label.notna() & (numeric_label % 1 == 0)
-    in_range = numeric_label.between(0, num_labels - 1, inclusive="both")
-    labels["_label"] = numeric_label.astype("Int64")
+    labels["_label_code"] = labels[label_column].map(normalize_label_code)
+    missing_count = int((labels["_label_code"] == "").sum())
+    labels.loc[labels["_label_code"] == "", "_label_code"] = "0"
+    observed_codes = sorted(
+        {code for code in labels["_label_code"] if code},
+        key=_label_sort_key,
+    )
+    if label_mapping is None:
+        label_mapping = {code: index for index, code in enumerate(observed_codes)}
+    unknown_codes = sorted(
+        {code for code in observed_codes if code not in label_mapping},
+        key=_label_sort_key,
+    )
+    labels["_label"] = labels["_label_code"].map(label_mapping).astype("Int64")
     labels["_label_status"] = "OK"
-    labels.loc[numeric_label.isna(), "_label_status"] = "MISSING_LABEL"
-    labels.loc[numeric_label.notna() & ~(is_integer & in_range), "_label_status"] = "INVALID_LABEL"
+    labels.loc[labels["_label_code"].isin(unknown_codes), "_label_status"] = "INVALID_LABEL"
     invalid_count = int((labels["_label_status"] == "INVALID_LABEL").sum())
-    missing_count = int((labels["_label_status"] == "MISSING_LABEL").sum())
     if invalid_count:
         LOGGER.warning(
-            "0~%d 정수가 아닌 %s %d개를 학습에서 제외합니다.",
-            num_labels - 1,
+            "label map에 없는 %s 값 %d개를 학습에서 제외합니다: %s",
             label_column,
             invalid_count,
+            unknown_codes[:20],
         )
     if missing_count:
-        LOGGER.warning("%s이 비어 있는 행 %d개를 학습에서 제외합니다.", label_column, missing_count)
+        LOGGER.info(
+            "%s이 비어 있는 행 %d개를 하위 카테고리 0으로 분류합니다.",
+            label_column,
+            missing_count,
+        )
     labels["_ministry_norm"] = labels["소관명"].map(normalize_name)
     labels["_activity_norm"] = labels["세부사업명"].map(normalize_name)
     labels["_activity_account_norm"] = labels["세부사업명"].map(
         lambda value: normalize_name(value, compensate_account=True)
     )
-    return labels, files
+    if num_labels not in (None, 0, len(label_mapping)):
+        raise ValueError(
+            f"num_labels={num_labels}이 실제 하위 카테고리 수 {len(label_mapping)}와 다릅니다"
+        )
+    return labels, files, label_mapping
 
 
 def _failure_row(
@@ -244,7 +283,13 @@ def match_documents_to_labels(
                 if len(explicit_labels) == 1:
                     # 동일 문서가 여러 예산 행에 연결됐더라도 정답이 같으면
                     # 문서 중복 학습을 피하기 위해 첫 행을 대표로 사용한다.
-                    explicit = [explicit[0]]
+                    explicit = [
+                        next(
+                            idx
+                            for idx in explicit
+                            if labels.at[idx, "_label_status"] == "OK"
+                        )
+                    ]
                 else:
                     rows = ",".join(
                         str(int(labels.at[idx, "_source_row"])) for idx in explicit[:20]
@@ -318,7 +363,13 @@ def match_documents_to_labels(
                 if labels.at[idx, "_label_status"] == "OK"
             }
             if len(matched_labels) == 1:
-                matched = [matched[0]]
+                matched = [
+                    next(
+                        idx
+                        for idx in matched
+                        if labels.at[idx, "_label_status"] == "OK"
+                    )
+                ]
                 match_type = f"{match_type}_SAME_LABEL_DEDUP"
             else:
                 rows = ",".join(str(int(labels.at[idx, "_source_row"])) for idx in matched[:20])

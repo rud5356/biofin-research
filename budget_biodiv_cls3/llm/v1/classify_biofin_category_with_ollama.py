@@ -5,9 +5,9 @@ SYSTEM_PROMPT는 의도적으로 비워 두었습니다. 분류 기준 프롬프
 확정되면 해당 변수에 내용을 넣어 사용하세요.
 
 사용 예:
-    python classify_biofin_category_with_ollama.py --dry-run
-    python classify_biofin_category_with_ollama.py --limit-keys 10
-    python classify_biofin_category_with_ollama.py --overwrite
+    python llm/v1/classify_biofin_category_with_ollama.py --dry-run
+    python llm/v1/classify_biofin_category_with_ollama.py --limit-keys 10
+    python llm/v1/classify_biofin_category_with_ollama.py --overwrite
 """
 from __future__ import annotations
 
@@ -26,6 +26,11 @@ from pathlib import Path
 from typing import Any
 from urllib import request
 from urllib.error import HTTPError, URLError
+
+LLM_DIR = Path(__file__).resolve().parents[1]
+if str(LLM_DIR) not in sys.path:
+    sys.path.insert(0, str(LLM_DIR))
+from document_parser import DocumentParseError, extract_document  # noqa: E402
 
 
 DEFAULT_MODEL = "gemma3:12b"
@@ -271,6 +276,9 @@ PROMPT_TEMPLATE = """\
 단위사업명: {단위사업명}
 세부사업명: {세부사업명}
 
+사업설명자료 본문:
+{document_text}
+
 반드시 아래 JSON 객체만 반환하라.
 {{
   "label": 0,
@@ -290,21 +298,27 @@ CACHE_FIELDS = (
     "evidence",
     "model",
     "input_text",
+    "document_status",
+    "document_path",
+    "document_chars",
     "raw_response",
     "updated_at",
 )
-EXTRA_OUTPUT_COLUMNS = ("confidence", "reason", "evidence")
+EXTRA_OUTPUT_COLUMNS = (
+    "confidence", "reason", "evidence",
+    "document_status", "document_path", "document_chars",
+)
 
 
 def parse_args() -> argparse.Namespace:
-    project_dir = Path(__file__).resolve().parents[1]
+    project_dir = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(
         description="예산 사업을 Ollama로 BIOFIN 1차 카테고리 0~9로 분류합니다."
     )
     parser.add_argument(
         "--input-file", type=Path, default=project_dir / DEFAULT_INPUT_FILE
     )
-    parser.add_argument("--output-dir", type=Path, default=project_dir / "outputs/llm")
+    parser.add_argument("--output-dir", type=Path, default=project_dir / "outputs/llm/v1")
     parser.add_argument("--output-file", type=Path, default=None)
     parser.add_argument("--cache-csv", type=Path, default=None)
     parser.add_argument("--audit-csv", type=Path, default=None)
@@ -317,6 +331,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL)
+    parser.add_argument(
+        "--doc-dir",
+        type=Path,
+        default=project_dir / "document/2023/사업설명자료",
+        help="사업설명자료 파일 폴더",
+    )
+    parser.add_argument(
+        "--max-document-chars",
+        type=int,
+        default=16000,
+        help="프롬프트에 포함할 사업설명자료 본문 최대 문자 수",
+    )
+    parser.add_argument(
+        "--no-document-text",
+        action="store_true",
+        help="사업설명자료를 읽지 않고 예산 메타데이터만 사용",
+    )
+    parser.add_argument("--num-ctx", type=int, default=16384)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--retries", type=int, default=1)
@@ -404,11 +436,81 @@ def build_input_text(row: dict[str, str]) -> str:
     return " | ".join(f"{key}: {value}" for key, value in values.items() if value)
 
 
-def build_prompt(row: dict[str, str]) -> str:
+def build_prompt(row: dict[str, str], document_text: str) -> str:
     return PROMPT_TEMPLATE.format(
         classification_prompt=SYSTEM_PROMPT.strip(),
+        document_text=document_text,
         **prompt_values(row),
     ).strip()
+
+
+def resolve_document_path(row: dict[str, str], args: argparse.Namespace) -> Path | None:
+    """CSV의 절대·상대경로와 파일명을 이용해 실제 사업설명자료를 찾습니다."""
+    project_dir = Path(__file__).resolve().parents[2]
+    candidates: list[Path] = []
+    absolute = clean_cell(row.get("사업설명자료_절대경로"))
+    relative = clean_cell(row.get("사업설명자료_상대경로"))
+    filename = clean_cell(row.get("사업설명자료_파일명"))
+    if absolute:
+        candidates.append(Path(absolute))
+    if relative:
+        candidates.extend(
+            [
+                args.input_file.parent / relative,
+                project_dir / "document/2023" / relative,
+                args.doc_dir.parent / relative,
+            ]
+        )
+    if filename:
+        candidates.append(args.doc_dir / filename)
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            # 다른 OS에서 생성된 절대경로, 너무 긴 경로, 접근 불가 경로는
+            # 무시하고 상대경로/파일명 후보를 계속 확인합니다.
+            continue
+    return None
+
+
+def truncate_document(text: str, max_chars: int) -> str:
+    """긴 문서는 앞부분과 뒷부분을 함께 남겨 프롬프트 크기를 제한합니다."""
+    if len(text) <= max_chars:
+        return text
+    head = int(max_chars * 0.7)
+    tail = max_chars - head
+    return (
+        text[:head]
+        + "\n\n[... 문서 중간 부분 생략 ...]\n\n"
+        + text[-tail:]
+    )
+
+
+def load_document_for_prompt(
+    row: dict[str, str], args: argparse.Namespace
+) -> tuple[str, str, str, int]:
+    if args.no_document_text:
+        return "[사업설명자료 사용 안 함]", "DISABLED", "", 0
+    path = resolve_document_path(row, args)
+    if path is None:
+        return "[사업설명자료 파일을 찾지 못함]", "NOT_FOUND", "", 0
+    try:
+        full_text = extract_document(path)
+        prompt_text = truncate_document(full_text, args.max_document_chars)
+        return prompt_text, "PARSED", str(path), len(prompt_text)
+    except (DocumentParseError, RuntimeError, OSError) as exc:
+        return (
+            f"[사업설명자료 파싱 실패: {clean_cell(exc)[:300]}]",
+            "PARSE_FAILED",
+            str(path),
+            0,
+        )
 
 
 def parse_jsonish_response(text: str) -> dict[str, Any]:
@@ -456,7 +558,7 @@ def call_ollama(prompt: str, args: argparse.Namespace) -> str:
         "model": args.model,
         "prompt": prompt,
         "stream": False,
-        "options": {"temperature": 0, "top_p": 0.1, "num_ctx": 4096},
+        "options": {"temperature": 0, "top_p": 0.1, "num_ctx": args.num_ctx},
     }
     if not args.no_json_format:
         payload["format"] = "json"
@@ -472,10 +574,21 @@ def call_ollama(prompt: str, args: argparse.Namespace) -> str:
 
 
 def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
+    document_text, document_status, document_path, document_chars = (
+        load_document_for_prompt(row, args)
+    )
+    prompt = build_prompt(row, document_text)
     last_error: Exception | None = None
     for attempt in range(args.retries + 1):
         try:
-            result = parse_jsonish_response(call_ollama(build_prompt(row), args))
+            result = parse_jsonish_response(call_ollama(prompt, args))
+            result.update(
+                {
+                    "document_status": document_status,
+                    "document_path": document_path,
+                    "document_chars": document_chars,
+                }
+            )
             if args.delay > 0:
                 time.sleep(args.delay)
             return result
@@ -488,6 +601,9 @@ def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
         "confidence": 0.0,
         "reason": f"분류 실패: {last_error}",
         "evidence": "",
+        "document_status": document_status,
+        "document_path": document_path,
+        "document_chars": document_chars,
         "raw_response": "",
     }
 
@@ -528,6 +644,10 @@ def collect_items(
 
 def valid_cached_label(record: dict[str, Any] | None) -> bool:
     if not record:
+        return False
+    if record.get("document_status") not in {
+        "PARSED", "NOT_FOUND", "PARSE_FAILED", "DISABLED"
+    }:
         return False
     try:
         return int(record.get("label", -1)) in VALID_LABELS
@@ -714,6 +834,9 @@ def classify_items(
             "evidence": result["evidence"],
             "model": args.model,
             "input_text": item["input_text"],
+            "document_status": result["document_status"],
+            "document_path": result["document_path"],
+            "document_chars": result["document_chars"],
             "raw_response": result["raw_response"],
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
@@ -785,6 +908,9 @@ def write_outputs(
             "reason": cached.get("reason", ""),
             "evidence": cached.get("evidence", ""),
             "input_text": item["input_text"],
+            "document_status": cached.get("document_status", ""),
+            "document_path": cached.get("document_path", ""),
+            "document_chars": cached.get("document_chars", ""),
             "raw_response": cached.get("raw_response", ""),
         }
         audit_rows.append(audit)
@@ -797,7 +923,8 @@ def write_outputs(
 
     audit_headers = [
         "key_hash", "row_count", "label", "confidence",
-        "reason", "evidence", "input_text", "raw_response",
+        "reason", "evidence", "input_text", "document_status",
+        "document_path", "document_chars", "raw_response",
     ]
     write_csv(args.audit_csv, audit_headers, audit_rows)
     write_csv(args.review_csv, audit_headers, review_rows)
@@ -824,6 +951,10 @@ def write_outputs(
 
 def main() -> int:
     args = parse_args()
+    if args.max_document_chars < 1:
+        raise ValueError("--max-document-chars는 1 이상이어야 합니다.")
+    if args.num_ctx < 1024:
+        raise ValueError("--num-ctx는 1024 이상이어야 합니다.")
     set_default_paths(args)
     headers, rows, encoding = read_csv(args.input_file)
     missing = [column for column in KEY_COLUMNS if column not in headers]
