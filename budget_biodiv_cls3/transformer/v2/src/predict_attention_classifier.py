@@ -265,7 +265,14 @@ def _match_by_filename_or_id(
     matched = filename_lookup.get(path.name.casefold(), [])
     match_type = "MATCHED_FILENAME"
     if not matched:
-        number_match = re.match(r"^(\d+)_", path.name)
+        # 표준 파일명은 ``연도_소관_사업명_...`` 형식이다. 앞의 4자리
+        # 연도를 CSV No.로 오인하지 않도록, 표준 파일명 해석이 안 되는
+        # 레거시 ``No._파일명`` 형식에만 ROW_ID fallback을 허용한다.
+        number_match = (
+            re.match(r"^(\d+)_", path.name)
+            if parse_document_filename(path) is None
+            else None
+        )
         if number_match:
             matched = id_lookup.get(number_match.group(1), [])
             match_type = "ROW_ID"
@@ -300,6 +307,7 @@ def build_prediction_records(
     records: list[dict[str, Any]] = []
     success_rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    used_source_rows: dict[int, str] = {}
     for position, path in enumerate(selected, start=1):
         row, match_type, detail = _match_by_filename_or_id(
             path, budget, filename_lookup, id_lookup
@@ -322,6 +330,17 @@ def build_prediction_records(
             )
             failures.append(_failure_row(reason, detail, identity))
             continue
+        source_row = int(row["_source_row"])
+        previous_path = used_source_rows.get(source_row)
+        if previous_path is not None:
+            failures.append(
+                _failure_row(
+                    "DUPLICATE_SOURCE_ROW",
+                    f"source row {source_row}가 이미 다른 문서에 사용됨: {previous_path}",
+                    identity,
+                )
+            )
+            continue
         try:
             body = extract_document(path, use_hwp_com=use_hwp_com)
         except DocumentParseError as exc:
@@ -339,9 +358,10 @@ def build_prediction_records(
             "source_type": "document",
             "match_type": match_type,
             "source_file": str(row["_source_file"]),
-            "source_row": int(row["_source_row"]),
+            "source_row": source_row,
         }
         records.append(record)
+        used_source_rows[source_row] = str(path.resolve())
         success_rows.append(
             {
                 key: value

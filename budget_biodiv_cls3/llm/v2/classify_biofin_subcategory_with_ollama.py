@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+from http.client import RemoteDisconnected
 import json
 import re
 import sys
@@ -622,7 +623,16 @@ def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
             if args.delay > 0:
                 time.sleep(args.delay)
             return result
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            RemoteDisconnected,
+            ConnectionError,
+            OSError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
             last_error = exc
             if attempt < args.retries:
                 time.sleep(args.retry_delay)
@@ -687,6 +697,8 @@ def parse_valid_label(value: Any) -> str | None:
     text = clean_cell(value)
     if not text:
         return None
+    if re.fullmatch(r"0(?:\.0+)?", text):
+        return "0"
     match = re.match(r"^(0|[1-9]\.0[1-9])(?:\s|$)", text)
     if match and match.group(1) in VALID_LABEL_SET:
         return match.group(1)

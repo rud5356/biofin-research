@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+from http.client import RemoteDisconnected
 import json
 import re
 import sys
@@ -592,7 +593,16 @@ def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
             if args.delay > 0:
                 time.sleep(args.delay)
             return result
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            RemoteDisconnected,
+            ConnectionError,
+            OSError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
             last_error = exc
             if attempt < args.retries:
                 time.sleep(args.retry_delay)
