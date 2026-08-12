@@ -3,6 +3,7 @@ __pycache__/
 .env
 *.log
 .DS_Store
+node_modules/
 
 # 데이터 파일
 *.csv

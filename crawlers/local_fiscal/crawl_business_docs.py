@@ -123,7 +123,7 @@ class CrawlConfig:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "지방재정365 7개 광역지역의 세부사업별 세출현황을 수집하고 "
+            "지방재정365 지정 지역의 세부사업별 세출현황을 수집하고 "
             "상세 화면을 PDF로 저장"
         )
     )
@@ -133,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         choices=list(TARGET_REGIONS),
         default=list(TARGET_REGIONS),
-        help="수집할 지역(기본: 서울 부산 대구 대전 인천 광주 울산)",
+        help="수집할 지역(기본: 서울 부산 대구 대전 인천 광주 울산 강원)",
     )
     parser.add_argument(
         "--limit",
