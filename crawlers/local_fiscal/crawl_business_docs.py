@@ -133,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         choices=list(TARGET_REGIONS),
         default=list(TARGET_REGIONS),
-        help="수집할 지역(기본: 서울 부산 대구 대전 인천 광주 울산 강원)",
+        help="수집할 지역(기본: 전국 17개 시도)",
     )
     parser.add_argument(
         "--limit",

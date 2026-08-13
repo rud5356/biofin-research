@@ -1,11 +1,11 @@
 # 지방재정365 크롤러
 
 [세부사업별 세출현황](https://www.lofin365.go.kr/portal/LF3120202.do)에서
-서울·6개 광역시·강원의 사업 목록을 수집하고 각 사업의 상세 화면을 PDF로 저장합니다.
+전국 17개 시도의 사업 목록을 수집하고 각 사업의 상세 화면을 PDF로 저장합니다.
 
 기본 조회 조건:
 
-- 지역: 서울, 부산, 대구, 대전, 인천, 광주, 울산, 강원
+- 지역: 전국 17개 시도
 - 자치단체: 기본값(해당 지역의 본청·자치구·군 전체)
 - 회계: 전체
 - 분야: 전체
@@ -47,6 +47,12 @@ python crawl_business_docs.py --limit 0
 python crawl_business_docs.py --regions 강원 --date 2024-12-31 --limit 0
 ```
 
+세종·제주·강원·전북과 6개 도를 이어서 수집하려면:
+
+```bash
+python crawl_business_docs.py --regions 세종 제주 강원 전북 경기 충북 충남 전남 경북 경남 --date 2024-12-31 --limit 0
+```
+
 기존 정상 PDF는 자동으로 건너뜁니다. 실패 항목만 다시 실행하려면:
 
 ```bash
@@ -63,7 +69,7 @@ python crawl_business_docs.py --limit 0 --overwrite
 
 | 옵션 | 기본값 | 설명 |
 |---|---:|---|
-| `--regions` | 8개 지역 | 수집할 지역 목록 |
+| `--regions` | 전국 17개 시도 | 수집할 지역 목록 |
 | `--date` | `2024-12-31` | 조회 기준일 |
 | `--limit` | `5` | 지역별 최대 사업 수, `0`은 전체 |
 | `--list-only` | 꺼짐 | 목록 CSV만 저장 |
