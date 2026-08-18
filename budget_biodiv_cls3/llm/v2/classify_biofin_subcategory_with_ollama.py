@@ -22,7 +22,7 @@ import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib import request
@@ -39,10 +39,10 @@ DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_INPUT_FILE = Path("document/2023biofin_label_matched.csv")
 DEFAULT_LABEL_COLUMN = "LLM BIOFIN 하위 카테고리"
 DEFAULT_GOLD_LABEL_COLUMN = "하위 카테고리"
-PROMPT_VERSION = "kr-biofin-subcategory-2026-08-12-v2"
+PROMPT_VERSION = "kr-biofin-subcategory-2026-08-18-detailed-v4"
 VALID_LABELS = (
     "0",
-    "1.01", "1.02", "1.03", "1.04",
+    "1.01", "1.02", "1.03", "1.04", "1.05",
     "2.01", "2.02", "2.03", "2.04", "2.05", "2.06",
     "3.01", "3.02",
     "4.01", "4.02", "4.03", "4.04", "4.05", "4.06", "4.07",
@@ -70,13 +70,13 @@ SYSTEM_PROMPT = """\
 너는 대한민국 정부 예산사업을 BIOFIN/GLOBE 생물다양성 지출 기준에 따라
 BIOFIN 하위 카테고리 코드 중 정확히 하나로 분류하는 전문 분류자다.
 
-반드시 먼저 상위 범주를 판단한 뒤, 그 범주 아래에서 사업의 핵심 목적과
-가장 구체적으로 일치하는 하위 코드 하나를 선택한다. 상위 번호 1~9만
-출력해서는 안 된다. 생물다양성 비해당은 "0"으로 출력한다.
+입력으로 제공된 1차 카테고리를 변경하지 말고, 그 범주 아래에서 사업의
+핵심 목적과 가장 구체적으로 일치하는 하위 코드 하나를 선택한다. 상위 번호
+1~9만 출력해서는 안 된다. 1차 카테고리가 0이면 "0"으로 출력한다.
 
 허용되는 최종 코드는 다음뿐이다.
 0,
-1.01, 1.02, 1.03, 1.04,
+1.01, 1.02, 1.03, 1.04, 1.05,
 2.01, 2.02, 2.03, 2.04, 2.05, 2.06,
 3.01, 3.02,
 4.01, 4.02, 4.03, 4.04, 4.05, 4.06, 4.07,
@@ -125,7 +125,7 @@ BIOFIN 하위 카테고리 코드 중 정확히 하나로 분류하는 전문 �
 - 1.02 유전자원 접근·이용 계약 체결
 - 1.03 유전자원 이익공유 메커니즘
 - 1.04 나고야의정서 이행
-- 유전자원 정보 접근권 보장
+- 1.05 유전자원 정보 접근권 보장
 
 대표 포함 사례: 감염병표준실험실운영, 산림품종보호·채종원관리,
 야생생물 유전자원 활용지원기반 구축. 일반 생명공학 연구만 수행하고
@@ -324,10 +324,100 @@ BIOFIN 하위 카테고리 코드 중 정확히 하나로 분류하는 전문 �
 
 # 시스템 프롬프트와 별도로 유지하는 입출력 형식입니다.
 # 하위 코드 하나를 JSON으로 반환하게 합니다.
+SYSTEM_PROMPT += """
+
+[하위 카테고리 상세 판정 기준 — 이 절을 앞의 요약보다 우선 적용]
+
+공통 원칙:
+- 키워드는 판정 단서이지 단독 정답이 아니다. 사업명과 사업설명자료에서 실제 목적·활동을 확인한다.
+- 둘 이상의 코드가 가능하면 핵심 목적, 가장 큰 예산 활동, 가장 구체적인 산출물을 기준으로 하나만 고른다.
+- 입력된 1차 카테고리는 바꾸지 않으며 반드시 그 범주 안에서만 아래 기준을 적용한다.
+
+1. 유전자원 접근 및 이익공유(ABS)
+- 1.01 생물탐사, 생물다양성 지역·유전자원 선별, 탐색·이용 조사, 접근 규제·허가 제도.
+- 1.02 제공자와 이용자 사이의 유전자원 접근·이용 계약 및 이익공유 계약 체결.
+- 1.03 로열티·수수료·지식재산권 등 금전적·비금전적 이익 배분 메커니즘.
+- 1.04 나고야의정서 이행, 국가책임·연락기관과 ABS 정보공유체계. '나고야의정서' 명시는 강한 단서다.
+- 1.05 유전자원 정보에 대한 접근권과 정보 이용 기반 보장.
+
+2. 인식 제고 및 연구
+- 2.01 초·중·고·대학 정규 교육과정의 생물다양성 교육.
+- 2.02 비정규·특별·직업·대상별 교육과 지도·훈련. 의무·정규교육이 아닌 교육은 이 코드.
+- 2.03 대중 강연, 광고, 캠페인, 홍보와 의사소통을 통한 인식 제고.
+- 2.04 과학 연구, 조사, 자료수집, 모니터링, 통계, 정보화, DB 구축. 연구·연구소·수목원·생물관·R&D가 사업 또는 상위사업의 핵심이면 포함.
+- 2.05 원주민·지역사회의 전통지식 조사·연구·기록·보전. 농업 한정 전통지식의 실제 이용·관리는 9.01을 검토.
+- 2.06 생물다양성 정보공유 플랫폼과 CBD 정보공유체계. CBD 명시는 강한 단서다.
+- 지식·연구 공유형 ODA는 실제 활동에 따라 2.04~2.06을 적용하고, 단순 ODA 표기만으로 정하지 않는다.
+
+3. 생물안전성
+- 3.01 침입외래종(IAS)의 유입 차단·예찰·방제·피해 저감. 생태계 피해를 주는 개·고양이 관리도 포함한다. IAS 또는 람사르협약이 명시되면 이 코드 적용 여부를 우선 확인한다.
+- 3.02 GMO·LMO의 생태계 위해 방지와 관리. 카르타헤나의정서, GMO, LMO 명시는 강한 단서다.
+
+4. 녹색경제와 생물다양성
+- 4.01 원료조달부터 물류·폐기까지 자원·환경 효율을 높이는 녹색 공급망.
+- 4.02 채굴·채석 등 추출산업의 생물다양성 피해 최소화.
+- 4.03 식품·건설·교통·관광·여가·의류 등의 과소비, 생태발자국과 폐기물을 줄이는 지속가능 소비.
+- 4.04 대체·재생·바이오에너지, 자원·에너지 효율, 배터리와 에너지 전환. 바이오연료 생산은 9.02, 연구는 2.04, 이용·보급은 4.04.
+- 4.05 지속가능 관광, 관광지 개발, 관광객 이용 중심의 국립공원 시설·관리. 법정 보호지역 보전·관리 자체가 목적이면 7.01.
+- 4.06 대중교통, 하이브리드차·수소차·전기차, 친환경 선박 등 지속가능 교통. 선박의 해양오염 방지·대응이 핵심이면 6.04.
+- 4.07 개발영향을 줄이는 지속가능 도시·농촌, 도시농업, 도시 숲과 도시 생물다양성·그린 인프라.
+- 개별 개발사업의 환경영향평가는 실제 녹색 활동에 맞는 4번대를 검토하고, 전략환경평가 제도는 5.05로 분류한다.
+
+5. 생물다양성 기획 및 재정
+- 5.01 생물다양성을 명시한 법률, 국가·지역 계획과 정책.
+- 5.02 생물다양성에 영향을 줄 수 있는 다른 부처·부문의 법률·정책 조치.
+- 5.03 이해관계자·권리보유자 조정체계, 협업 플랫폼, 타당성 검토, 부처 간 회의·협의회 운영.
+- 5.04 생물다양성 재원 확보·동원, 효율적 재정운영, 재정계획·법률과 미래비용 회피. 재원조달 체계가 핵심인 금융·융자·지원은 포함하되 신재생에너지 융자처럼 특정 부문 보급이 핵심이면 4.04 등 해당 부문 코드가 우선이다.
+- 5.05 전략환경평가(SEA) 제도와 기초생태조사.
+- 5.06 국토·연안·도시 공간계획, 부지 선정·구축, 개발제한과 생태구획, 보호·금지 구획. 특정 산업개발·산업단지 실행은 4번 또는 9번의 실제 활동을 우선한다.
+- 5.07 다자간환경협약(MEA)의 체결·이행, 환경 협정·협회·협의회·회담·포럼·국제기구, 현금성 원조 ODA.
+- 5.08 열린 정부, 환경정보 공개, 의사결정 참여, FPIC. 자료의 FRIC 표기도 같은 단서로 본다. 유전자원 이익공유·정보접근이면 1.03 또는 1.05가 우선이다.
+
+6. 오염 관리
+- 사람의 건강·위생만을 위한 정화는 제외한다. 6.02와 6.06은 생물다양성·생태계 보호 목적이 명시돼야 하며, 나머지는 오염의 직접적인 생태계 영향으로 간접 편익을 인정할 수 있다.
+- 6.01 토양·지하수·지표수 오염 예방·복원, 수질오염 측정·감시·관리.
+- 6.02 미세먼지·대기질·CO2·온실가스·넷제로 등 대기·기후 오염 대응. 생물다양성 목적이 명시된 경우에만 적용.
+- 6.03 하수·폐수·생활폐기물 감축·수거·처리·재활용·퇴비화와 저준위 방사성폐기물 관리.
+- 6.04 연안·해양 오염, 해양쓰레기와 오염물질의 예방·수거·정화, 오염 저감 목적의 선박 개선.
+- 6.05 빛·소음·진동·열·방사선, 고준위 방사성폐기물, POPs, PCB 기름, 의약물질, 중금속 등 기타 오염.
+- 6.06 오염 대응 인식·역량·자료와 관리기반 조성. 생물다양성 목적이 명시된 경우에만 적용.
+
+7. 보호지역 및 기타 보전조치
+- 7.01 법정 보호지역·ICCA의 지정·관리와 토지소유·매수. 천연기념물, 세계유산, 명승, 국립·자연공원, 보호·보존지역 등 법적 보호지역이 확인될 때 적용.
+- 7.02 보호지역 밖 해안·산림·경관 등에서 보호·보전이 목적인 현지 내 보전.
+- 7.03 OECM·자연공존지역처럼 주목적은 다르지만 개발제한이 강제되는 지역. DMZ, 군사구역, 상수원 주변, 대학 연구림, 사찰림, 국유림 등을 실제 보전조치와 함께 검토한다. OECM·자연공존지역 명시는 강한 단서다.
+- 7.04 이동성·멸종위기·보호 야생종의 현지 내 보호와 보전조치. 가축·재배종은 9.01, 야생종의 채취·수렵 등 지속가능한 이용은 9.09.
+
+8. 복원
+- 8.01 종의 재도입·증식·관리, 서식지 이전, 야생 방사, 보호종 포획과 생태재료 운반 등 종 중심 복원.
+- 8.02 훼손지 완화·복원을 위한 토목·건축·시설과 대규모 공학적 복원.
+- 8.03 복원이 끝난 특정 지역의 비공학적 사후 유지·관리.
+
+9. 지속 가능한 이용과 생물다양성
+- 농림수산업의 지속가능성과 생태계 영향을 개선하며 재해·산불·침식 예방도 포함한다.
+- 9.01 식용·농림수산 유전자원, 품종·종자은행·축산, 인증, 수확·전통 관리방식과 농업 한정 전통지식 등 농업생물다양성 관리.
+- 9.02 유기농·친환경 인증, 지속가능 경종·축산, 비료 감축, 스마트팜·농업 AI·기계화·로봇과 바이오연료 생산.
+- 9.03 통제된 시설에서 어류·패류·수생식물을 기르는 지속가능 양식. 개방형 가두리는 실제 방식과 환경성과를 확인한다.
+- 9.04 자연산 어류·패류·해조류의 포획·채취와 지속가능 어업.
+- 9.05 지속가능 산림경영, 조림·숲가꾸기, 산불·산사태·침식 예방과 사방사업.
+- 9.06 담수·유역·상수원·농업용수·관개사업, 댐과 수자원 이용의 부정적 영향 저감 및 수원 인근 공동체 관리.
+- 9.07 양식·어업 이외의 지속가능한 연안·해양 이용과 관리.
+- 9.08 자연 방목지·초지·관목지 보호와 침식·화재 위험 관리.
+- 9.09 비가축 야생동물과 자생식물의 채취·벌목·수렵 등 지속가능한 이용·관리.
+"""
+
 PROMPT_TEMPLATE = """\
 {classification_prompt}
 
 다음 예산 사업을 BIOFIN 하위 카테고리 코드 중 하나로 분류하라.
+
+이미 판정된 BIOFIN 1차 카테고리: {BIOFIN_1차_카테고리}
+허용 출력 범위: {allowed_labels}
+
+1차 카테고리가 1~9이면 반드시 같은 번호로 시작하는 하위 코드만 선택하라.
+예를 들어 1차 카테고리가 6이고 하위 번호가 5라면 결과는 "6.05"다.
+1차 카테고리가 0이면 반드시 "0"을 선택하라. 1차 값을 다시 판정하거나
+다른 1차 카테고리의 코드를 선택해서는 안 된다.
 
 소관명: {소관명}
 회계명: {회계명}
@@ -473,9 +563,12 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> 
 
 def build_key(row: dict[str, str]) -> str:
     business_key = clean_cell(row.get("business_key"))
+    first_category = clean_cell(row.get("BIOFIN 1차 카테고리"))
     if business_key:
-        return f"business_key:{business_key}"
-    return "␟".join(clean_cell(row.get(column)) for column in KEY_COLUMNS)
+        return f"business_key:{business_key}|first_category:{first_category}"
+    return "␟".join(
+        [*(clean_cell(row.get(column)) for column in KEY_COLUMNS), first_category]
+    )
 
 
 def hash_key(key: str) -> str:
@@ -496,15 +589,42 @@ def prompt_values(row: dict[str, str]) -> dict[str, str]:
     return {column: clean_cell(row.get(column)) for column in columns}
 
 
+def normalize_first_category(value: Any) -> str | None:
+    """CSV의 1차 카테고리를 0~9 문자열로 정규화한다."""
+    text = clean_cell(value)
+    match = re.fullmatch(r"([0-9])(?:\.0+)?", text)
+    return match.group(1) if match else None
+
+
+def allowed_labels_for_first_category(first_category: str | None) -> tuple[str, ...]:
+    if first_category is None:
+        return VALID_LABELS
+    if first_category == "0":
+        return ("0",)
+    return tuple(label for label in VALID_LABELS if label.startswith(f"{first_category}."))
+
+
 def build_input_text(row: dict[str, str]) -> str:
     values = prompt_values(row)
+    values = {
+        "BIOFIN 1차 카테고리": clean_cell(row.get("BIOFIN 1차 카테고리")),
+        **values,
+    }
     return " | ".join(f"{key}: {value}" for key, value in values.items() if value)
 
 
 def build_prompt(row: dict[str, str], document_text: str) -> str:
+    first_category = normalize_first_category(row.get("BIOFIN 1차 카테고리"))
+    if first_category is None:
+        raise ValueError("'BIOFIN 1차 카테고리' 값이 없거나 0~9 형식이 아닙니다.")
+    allowed_labels = allowed_labels_for_first_category(first_category)
+    if not allowed_labels:
+        raise ValueError(f"정의되지 않은 BIOFIN 1차 카테고리입니다: {first_category}")
     return PROMPT_TEMPLATE.format(
         classification_prompt=SYSTEM_PROMPT.strip(),
         document_text=document_text,
+        BIOFIN_1차_카테고리=first_category if first_category is not None else "미제공",
+        allowed_labels=", ".join(allowed_labels),
         **prompt_values(row),
     ).strip()
 
@@ -578,7 +698,10 @@ def load_document_for_prompt(
         )
 
 
-def parse_jsonish_response(text: str) -> dict[str, Any]:
+def parse_jsonish_response(
+    text: str,
+    first_category: str | None = None,
+) -> dict[str, Any]:
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
     try:
         data = json.loads(raw)
@@ -603,6 +726,10 @@ def parse_jsonish_response(text: str) -> dict[str, Any]:
     label = parse_valid_label(data.get("label"))
     if label is None:
         raise ValueError(f"허용되지 않은 하위 카테고리: {data.get('label')}")
+    if label not in allowed_labels_for_first_category(first_category):
+        raise ValueError(
+            f"1차 카테고리 {first_category}의 하위 코드가 아닙니다: {label}"
+        )
 
     try:
         confidence = float(data.get("confidence", 0.0))
@@ -643,10 +770,13 @@ def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
         load_document_for_prompt(row, args)
     )
     prompt = build_prompt(row, document_text)
+    first_category = normalize_first_category(row.get("BIOFIN 1차 카테고리"))
     last_error: Exception | None = None
     for attempt in range(args.retries + 1):
         try:
-            result = parse_jsonish_response(call_ollama(prompt, args))
+            result = parse_jsonish_response(
+                call_ollama(prompt, args), first_category=first_category
+            )
             result.update(
                 {
                     "document_status": document_status,
@@ -932,6 +1062,13 @@ def classify_items(
 
     lock = threading.Lock()
     completed = 0
+    started_at = time.monotonic()
+
+    def format_duration(seconds: float) -> str:
+        total_seconds = max(0, int(round(seconds)))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
     def process(key_hash: str, item: dict[str, Any]) -> None:
         nonlocal completed
@@ -954,9 +1091,17 @@ def classify_items(
         with lock:
             cache[key_hash] = record
             completed += 1
+            elapsed = time.monotonic() - started_at
+            seconds_per_item = elapsed / completed
+            remaining_seconds = seconds_per_item * (len(pending) - completed)
+            estimated_finish = datetime.now() + timedelta(seconds=remaining_seconds)
             print(
                 f"[{completed:,}/{len(pending):,}] "
                 f"label={record['label']} conf={record['confidence']} "
+                f"경과={format_duration(elapsed)} "
+                f"평균={seconds_per_item:.1f}초/건 "
+                f"잔여={format_duration(remaining_seconds)} "
+                f"예상완료={estimated_finish:%Y-%m-%d %H:%M:%S} "
                 f"{item['input_text'][:70]}"
             )
             if args.save_every > 0 and completed % args.save_every == 0:

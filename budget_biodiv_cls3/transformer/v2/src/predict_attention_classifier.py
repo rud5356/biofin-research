@@ -27,8 +27,8 @@ from build_dataset import (
     build_budget_metadata_text,
     discover_documents,
     document_collate_fn,
+    build_hierarchical_label_codes,
     normalize_name,
-    normalize_label_code,
     parse_document_filename,
 )
 from document_parser import DocumentParseError, extract_document
@@ -151,7 +151,7 @@ def load_budget_data(
         lambda value: normalize_name(value, compensate_account=True)
     )
     if label_column in frame.columns:
-        codes = frame[label_column].map(normalize_label_code)
+        codes = build_hierarchical_label_codes(frame, label_column)
         frame["_true_label"] = codes.map(label_mapping or {}).astype("Int64")
     else:
         frame["_true_label"] = pd.Series(pd.NA, index=frame.index, dtype="Int64")

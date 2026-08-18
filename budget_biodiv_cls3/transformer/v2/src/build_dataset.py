@@ -26,6 +26,8 @@ from utils import read_csv_flexible, safe_scalar
 
 LOGGER = logging.getLogger("budget_document_classifier")
 REQUIRED_COLUMNS = {"회계연도", "소관명", "세부사업명"}
+FIRST_CATEGORY_COLUMN = "BIOFIN 1차 카테고리"
+RAW_SUBCATEGORY_COLUMN = "하위"
 ACCOUNT_WORDS = (
     "일반회계",
     "특별회계",
@@ -139,6 +141,67 @@ def normalize_label_code(value: Any) -> str:
     return format(number.normalize(), "f")
 
 
+def compose_subcategory_code(first_category: Any, subcategory: Any) -> str:
+    """1차와 하위 번호를 ``6.05`` 형태의 계층 코드로 결합한다."""
+    first = normalize_label_code(first_category)
+    lower = normalize_label_code(subcategory)
+    if not first and not lower:
+        return ""
+    if first in {"", "0"}:
+        return "0" if lower in {"", "0"} else ""
+    if not re.fullmatch(r"[1-9]", first) or not re.fullmatch(r"\d+", lower):
+        return ""
+    lower_number = int(lower)
+    if not 1 <= lower_number <= 99:
+        return ""
+    return f"{first}.{lower_number:02d}"
+
+
+def build_hierarchical_label_codes(
+    frame: pd.DataFrame,
+    label_column: str = "하위 카테고리",
+) -> pd.Series:
+    """결합 레이블을 정규화하고 1차/하위 원본 컬럼과 일치하는지 검증한다."""
+    codes = frame[label_column].map(normalize_label_code)
+    if not {FIRST_CATEGORY_COLUMN, RAW_SUBCATEGORY_COLUMN}.issubset(frame.columns):
+        return codes
+
+    expected = pd.Series(
+        (
+            compose_subcategory_code(first, lower)
+            for first, lower in zip(
+                frame[FIRST_CATEGORY_COLUMN], frame[RAW_SUBCATEGORY_COLUMN]
+            )
+        ),
+        index=frame.index,
+        dtype="object",
+    )
+    # 결합 컬럼이 비었거나 단독 하위 번호라면 원본 계층 컬럼으로 복원한다.
+    standalone = codes.str.fullmatch(r"\d+", na=False) & (codes != "0")
+    recoverable = (codes == "") | standalone
+    codes = codes.where(~recoverable | (expected == ""), expected)
+
+    mismatch = (expected != "") & (codes != expected)
+    first_present = frame[FIRST_CATEGORY_COLUMN].map(normalize_label_code) != ""
+    lower_present = frame[RAW_SUBCATEGORY_COLUMN].map(normalize_label_code) != ""
+    invalid_source = (expected == "") & (first_present | lower_present)
+    bad = mismatch | invalid_source
+    if bad.any():
+        details = []
+        for index in frame.index[bad][:10]:
+            source_row = frame.at[index, "_source_row"] if "_source_row" in frame else index
+            details.append(
+                f"행 {source_row}: 1차={frame.at[index, FIRST_CATEGORY_COLUMN]!r}, "
+                f"하위={frame.at[index, RAW_SUBCATEGORY_COLUMN]!r}, "
+                f"결합={frame.at[index, label_column]!r}"
+            )
+        raise ValueError(
+            "1차 카테고리와 하위 카테고리 코드가 일치하지 않습니다: "
+            + "; ".join(details)
+        )
+    return codes
+
+
 def _label_sort_key(code: str) -> tuple[int, Decimal | str]:
     try:
         return (0, Decimal(code))
@@ -174,7 +237,7 @@ def load_label_data(
         raise ValueError(f"필수 컬럼이 없습니다: {', '.join(missing)}")
 
     labels["_year"] = pd.to_numeric(labels["회계연도"], errors="coerce").astype("Int64")
-    labels["_label_code"] = labels[label_column].map(normalize_label_code)
+    labels["_label_code"] = build_hierarchical_label_codes(labels, label_column)
     missing_count = int((labels["_label_code"] == "").sum())
     labels.loc[labels["_label_code"] == "", "_label_code"] = "0"
     observed_codes = sorted(
