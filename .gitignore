@@ -35,3 +35,6 @@ node_modules/
 
 # budget_biodiv_cls3 원본 사업설명자료 (HWP/HWPX, 재생성 가능)
 budget_biodiv_cls3/document/2023/사업설명자료/
+
+# build_biofin_continuity.py 결과물 (CSV + 사업설명자료 복사본, 재생성 가능)
+crawlers/open_fiscal/biofin_continuity_outputs/
