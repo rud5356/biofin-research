@@ -1,0 +1,52 @@
+{
+  "source": "C:/repos/biofin-research/budget_biodiv_cls3/document/open/2023biofin_label.csv",
+  "keys": [
+    "소관명",
+    "회계명",
+    "분야명",
+    "단위사업명",
+    "세부사업명"
+  ],
+  "normalization": "NFC, whitespace collapsed and trimmed; no fuzzy matching",
+  "referenceRows": 9074,
+  "total": 33675,
+  "matched": 25542,
+  "unknown": 8133,
+  "uniqueTotal": 11587,
+  "uniqueUnknown": 3675,
+  "annual": [
+    {
+      "year": 2019,
+      "total": 7891,
+      "matched": 5229,
+      "unknown": 2662,
+      "unknownUnique": 2656
+    },
+    {
+      "year": 2020,
+      "total": 8235,
+      "matched": 5800,
+      "unknown": 2435,
+      "unknownUnique": 2429
+    },
+    {
+      "year": 2021,
+      "total": 8590,
+      "matched": 6603,
+      "unknown": 1987,
+      "unknownUnique": 1981
+    },
+    {
+      "year": 2022,
+      "total": 8959,
+      "matched": 7910,
+      "unknown": 1049,
+      "unknownUnique": 1048
+    }
+  ],
+  "reasons": {
+    "2023 기준 사업 미매칭": 8133
+  },
+  "matchedRelated": 1273,
+  "matchedUnrelated": 24269
+}
