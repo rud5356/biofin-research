@@ -1,99 +1,84 @@
-# budget_biodiv_cls3
+# BIOFIN 예산사업 분류
 
-기존 예산 CSV의 텍스트와 매칭된 사업설명자료 전체 본문을 함께 사용하는
-BIOFIN 1차 카테고리(0~9) Transformer 분류 파이프라인입니다.
+예산 CSV의 사업정보와 사업설명자료를 사용해 BIOFIN 카테고리를 분류합니다.
+Transformer 학습·예측, Ollama LLM 분류, 단계별 라우팅 파이프라인을 포함합니다.
 
-## 입력
+## 실행 위치와 구성
 
-- 라벨 CSV: `document/2023biofin_label.csv`
-- 사업설명자료: `document/2023/사업설명자료/`
-- 정답 컬럼: `BIOFIN 1차 카테고리`
+이 문서와 하위 README의 명령은 별도 설명이 없으면 다음 폴더에서 실행합니다.
 
-예산 메타데이터와 사업설명자료 본문을 결합한 뒤, 긴 문서는 512 token
-chunk로 나누고 Attention Pooling으로 문서 단위 분류를 수행합니다.
+```powershell
+Set-Location C:\repos\biofin-research\budget_biodiv_cls3
+```
 
-## 데이터 점검
+실제 폴더명은 `budget_biodiv_cls3`입니다. `budget/_biodiv/_cls3`로 분리된 경로가 아닙니다.
 
-먼저 라벨 CSV와 수집 문서를 매칭합니다.
+| 구성 | 역할 | 안내 |
+| --- | --- | --- |
+| Transformer v1 | 상위 카테고리 0~9 학습·예측 | [README](transformer/v1/README.md) |
+| Transformer v2 | 계층형 하위 코드 학습·예측 | [README](transformer/v2/README.md) |
+| LLM v1 | Ollama로 상위 카테고리 0~9 분류 | [README](llm/v1/README.md) |
+| LLM v2 | Ollama로 비해당 0 및 39개 하위 코드 분류 | [README](llm/v2/README.md) |
+| 단계별 파이프라인 | 규칙 → Transformer → LLM 라우팅, 모델 연결은 미구현 | [README](pipeline/README.md) |
+
+Transformer 설치는 `python -m pip install -r requirements.txt`, LLM 문서 파싱 설치는
+`python -m pip install -r llm/requirements.txt`를 사용합니다.
+
+## 입력 CSV와 정답 컬럼
+
+최근 정리한 파일은 `document/open/BIOFIN_2023_취합_2026.09.14.csv`입니다.
+UTF-8 BOM으로 저장했으며 `BIOFIN분류`는 삭제하고 `1차`, `하위`의 빈칸을 0으로 채웠습니다.
+
+| 용도 | 코드의 기본 정답 컬럼 | 최근 CSV 사용 시 |
+| --- | --- | --- |
+| Transformer v1 학습 | `BIOFIN 1차 카테고리` | `--label_column "1차"` 지정 |
+| LLM v1 평가 | `BIOFIN 1차 카테고리` | `--gold-label-col "1차"` 지정 |
+| Transformer v2 학습 | `하위 카테고리` | 상위·하위를 결합한 코드 준비 필요 |
+| LLM v2 평가 | `하위 카테고리` | `6.05` 같은 결합 코드 준비 필요 |
+
+`1차`와 `BIOFIN 1차 카테고리`는 자동으로 같은 컬럼으로 인식되지 않습니다.
+Transformer v1의 필수 컬럼 오류는 `--label_column`으로 실제 헤더를 지정해 해결합니다.
+`BIOFIN분류`를 복원할 필요는 없습니다. 코드 기본값 자체는 변경하지 않았습니다.
+
+`하위`의 단독 번호 5와 계층 코드 `6.05`는 다릅니다. v2에 단순히
+`--label_column "하위"`만 지정하면 상위 정보가 사라질 수 있으므로
+[v2 입력 규칙](transformer/v2/README.md)을 먼저 확인합니다.
+
+## 문서 매칭
+
+기존 기본 입력 `document/2023biofin_label.csv`를 열린재정 목록 및 문서와 매칭합니다.
 
 ```powershell
 python match_2023_biofin_documents.py
 ```
 
-결과는 `document/2023biofin_label_matched.csv`, 미매칭 내역은
-`document/2023biofin_label_match_failed.csv`에 저장됩니다.
+기본 문서 폴더는 `document/2023/사업설명자료`, 목록은
+`document/2023/open_fiscal_2023.csv`입니다. 결과는
+`document/2023biofin_label_matched.csv`, 실패 내역은
+`document/2023biofin_label_match_failed.csv`입니다.
+다른 입력은 `--label-csv`, 출력은 `--output-csv`, `--failure-csv`로 지정합니다.
+이 스크립트는 정답 컬럼명을 바꾸거나 하위 코드를 만드는 용도가 아닙니다.
+
+## 최근 CSV로 Transformer v1 점검
 
 ```powershell
-python transformer/src/train_attention_classifier.py `
-  --label_file document/2023biofin_label_matched.csv `
-  --dry_run --document_only
+python transformer/v1/src/train_attention_classifier.py `
+  --label_file "document/open/BIOFIN_2023_취합_2026.09.14.csv" `
+  --label_column "1차" `
+  --doc_dir "document/2023/사업설명자료" `
+  --output_dir "transformer/v1/outputs/20260914_check" `
+  --dry_run
 ```
 
-`--document_only`를 빼면 문서가 없거나 파싱에 실패한 행은 예산 CSV
-메타데이터만으로 학습 데이터에 포함합니다.
+`--dry_run`은 모델 학습 없이 데이터 매칭·분포를 점검하고 로컬 점검 결과를 저장합니다.
+`--document_only`를 추가하면 문서가 없는 행의 예산정보 대체 입력을 제외합니다.
+학습·예측 명령과 결과 파일은 각 Transformer README에 정리했습니다.
 
-## 모델 학습
+## Ollama 연결
 
-기본 분할은 사업 그룹 기준 train/validation/test = 8:1:1입니다.
-동일한 소관명·세부사업명 조합은 서로 다른 split에 들어가지 않습니다.
+기본 연결은 `http://localhost:11434`, 모델은 `gemma3:12b`입니다.
+회사 공용 서버는 `--ollama-url`, 설치된 모델은 `--model`로 별도 지정합니다.
+원격 접속정보, 조회 방법, 소량 테스트와 캐시 분리는 [LLM 공통 안내](llm/README.md)를 참고합니다.
 
-```powershell
-python transformer/src/train_attention_classifier.py `
-  --label_file document/2023biofin_label_matched.csv `
-  --document_only --class_weight
-```
-
-주요 결과:
-
-- `outputs/model_results/best_model.pt`
-- `outputs/model_results/tokenizer/`
-- `outputs/model_results/split_assignments.csv`
-- `outputs/model_results/split_summary.json`
-- `outputs/model_results/test_predictions.csv`
-- `outputs/model_results/metrics.json`
-
-## 새 CSV 분류
-
-문서와 CSV의 key 매칭 컬럼을 준비한 뒤 실행합니다.
-
-```powershell
-python transformer/src/predict_attention_classifier.py `
-  --model_dir outputs/model_results `
-  --doc_dir document/2023/사업설명자료 `
-  --budget_file document/2023biofin_label.csv `
-  --output_dir outputs/predictions `
-  --no-heatmap
-```
-
-최종 `outputs/predictions/classified.csv`에는 원본 CSV 컬럼을 그대로
-유지하면서 `예측 BIOFIN 1차 카테고리` 컬럼 하나가 추가됩니다.
-
-## Ollama LLM으로 0~9 분류
-
-`llm/v1/classify_biofin_category_with_ollama.py`는 `cls2`의 캐시 기반 LLM
-분류 흐름을 참고한 BIOFIN 1차 카테고리(0~9) 분류 스크립트입니다.
-`llm/v2/classify_biofin_subcategory_with_ollama.py`는 BIOFIN 하위 코드로
-분류합니다.
-각 버전 폴더의 `clip_20260724142552447 (1).bmp` BIOFIN/GLOBE 분류 기준이
-`SYSTEM_PROMPT`에 반영돼 있습니다.
-
-```powershell
-# 입력 구조만 확인
-python llm/v1/classify_biofin_category_with_ollama.py --dry-run
-
-# 10개 고유 사업만 시험 분류
-python llm/v1/classify_biofin_category_with_ollama.py --limit-keys 10
-
-# 전체 분류
-python llm/v1/classify_biofin_category_with_ollama.py
-```
-
-기본 입력은 `document/2023biofin_label_matched.csv`, v1 기본 출력은
-`outputs/llm/v1/2023biofin_label_matched_llm_classified.csv`입니다.
-출력에는 `LLM BIOFIN 1차 카테고리`, `confidence`, `reason`,
-`evidence` 컬럼이 추가됩니다. 중단 후 재실행하면
-`outputs/llm/v1/category_label_cache.csv`를 재사용합니다.
-원본 `BIOFIN 1차 카테고리` 정답이 있으면 `evaluation_metrics.json`,
-`confusion_matrix.csv`, `incorrect_predictions.csv`도 자동 생성합니다.
-LLM v1과 v2 모두 매칭된 사업설명자료 본문을 사업 메타데이터와 함께
-프롬프트에 사용합니다.
+Transformer의 옵션은 `--label_file`, `--dry_run`처럼 밑줄을,
+LLM은 `--input-file`, `--dry-run`처럼 하이픈을 사용합니다.
