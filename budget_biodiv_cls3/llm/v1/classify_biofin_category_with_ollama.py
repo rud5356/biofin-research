@@ -481,8 +481,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label-col", default=DEFAULT_LABEL_COLUMN)
     parser.add_argument(
         "--gold-label-col",
-        default=DEFAULT_GOLD_LABEL_COLUMN,
-        help="정확도 평가에 사용할 원래 정답 컬럼",
+        default=None,
+        help="정확도 평가용 정답 컬럼. 생략 시 알려진 컬럼명을 자동 탐색",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL)
@@ -536,7 +536,26 @@ def set_default_paths(args: argparse.Namespace) -> None:
 
 
 def clean_cell(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip())
+    return re.sub(r"\s+", " ", str("" if value is None else value).strip())
+
+
+def resolve_gold_label_column(headers: list[str], requested: str | None) -> str:
+    if requested is not None:
+        if requested not in headers:
+            raise ValueError(f"지정한 정답 컬럼이 없습니다: {requested}")
+        return requested
+    candidates = [
+        name for name in (DEFAULT_GOLD_LABEL_COLUMN, "1차 카테고리", "1차")
+        if name in headers
+    ]
+    if len(candidates) > 1:
+        raise ValueError(
+            f"정답 컬럼 후보가 여러 개입니다: {candidates}. --gold-label-col로 지정하세요."
+        )
+    if candidates:
+        return candidates[0]
+    print("정답 컬럼 없음: 예측은 진행하지만 정확도 평가는 할 수 없습니다.")
+    return DEFAULT_GOLD_LABEL_COLUMN
 
 
 def read_csv(path: Path) -> tuple[list[str], list[dict[str, str]], str]:
@@ -669,6 +688,8 @@ def load_document_for_prompt(
 
 
 def parse_jsonish_response(text: str) -> dict[str, Any]:
+    if not text.strip():
+        raise ValueError("LLM 최종 응답이 비어 있습니다.")
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
     try:
         data = json.loads(raw)
@@ -687,12 +708,12 @@ def parse_jsonish_response(text: str) -> dict[str, Any]:
         else:
             data = json.loads(match.group(0))
 
-    try:
-        label = int(data["label"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("label이 정수가 아닙니다.") from exc
-    if label not in VALID_LABELS:
-        raise ValueError(f"label 범위 오류: {label}")
+    if not isinstance(data, dict):
+        raise ValueError("LLM 응답이 JSON 객체가 아닙니다.")
+    value = data.get("label")
+    label = None if isinstance(value, bool) else parse_valid_label(value)
+    if label is None:
+        raise ValueError(f"label은 0~9 정수여야 합니다: {value!r}")
 
     try:
         confidence = float(data.get("confidence", 0.0))
@@ -706,6 +727,12 @@ def parse_jsonish_response(text: str) -> dict[str, Any]:
         "evidence": clean_cell(data.get("evidence"))[:500],
         "raw_response": text,
     }
+
+
+class OllamaResponseError(ValueError):
+    def __init__(self, message: str, raw_response: str) -> None:
+        super().__init__(message)
+        self.raw_response = raw_response
 
 
 def call_ollama(prompt: str, args: argparse.Namespace) -> str:
@@ -724,8 +751,24 @@ def call_ollama(prompt: str, args: argparse.Namespace) -> str:
         method="POST",
     )
     with request.urlopen(req, timeout=args.timeout) as response:
-        body = json.loads(response.read().decode("utf-8"))
-    return str(body.get("response", ""))
+        raw_body = response.read().decode("utf-8")
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise OllamaResponseError("Ollama HTTP 응답이 JSON이 아닙니다.", raw_body) from exc
+    if not isinstance(body, dict):
+        raise OllamaResponseError("Ollama HTTP 응답이 JSON 객체가 아닙니다.", raw_body)
+    if body.get("error"):
+        raise OllamaResponseError(f"Ollama 서버 오류: {body['error']}", raw_body)
+    text = body.get("response")
+    if not isinstance(text, str) or not text.strip():
+        raise OllamaResponseError(
+            "Ollama 최종 response가 없거나 비어 있습니다. "
+            f"응답 필드={list(body)}, done_reason={body.get('done_reason')!r}, "
+            f"thinking 존재={bool(body.get('thinking'))}",
+            raw_body,
+        )
+    return text
 
 
 def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
@@ -734,9 +777,12 @@ def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
     )
     prompt = build_prompt(row, document_text)
     last_error: Exception | None = None
+    raw_response = ""
     for attempt in range(args.retries + 1):
         try:
-            result = parse_jsonish_response(call_ollama(prompt, args))
+            raw_response = ""
+            raw_response = call_ollama(prompt, args)
+            result = parse_jsonish_response(raw_response)
             result.update(
                 {
                     "document_status": document_status,
@@ -758,6 +804,8 @@ def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
             ValueError,
         ) as exc:
             last_error = exc
+            if isinstance(exc, OllamaResponseError):
+                raw_response = exc.raw_response
             if attempt < args.retries:
                 time.sleep(args.retry_delay)
     return {
@@ -768,7 +816,7 @@ def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
         "document_status": document_status,
         "document_path": document_path,
         "document_chars": document_chars,
-        "raw_response": "",
+        "raw_response": raw_response,
     }
 
 
@@ -1154,6 +1202,8 @@ def main() -> int:
         raise ValueError("--num-ctx는 1024 이상이어야 합니다.")
     set_default_paths(args)
     headers, rows, encoding = read_csv(args.input_file)
+    args.gold_label_col = resolve_gold_label_column(headers, args.gold_label_col)
+    print(f"평가용 정답 컬럼: {args.gold_label_col}")
     missing = [column for column in KEY_COLUMNS if column not in headers]
     if missing and "business_key" not in headers:
         raise ValueError(f"고유 사업 키 컬럼이 부족합니다: {', '.join(missing)}")

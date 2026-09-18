@@ -9,8 +9,9 @@
 기본 입력은 `document/2023biofin_label_matched.csv`입니다.
 사업 키는 `business_key` 또는 `소관명`, `분야명`, `부문명`, `프로그램명`,
 `단위사업명`, `세부사업명`으로 만듭니다.
-정답은 추론 입력이 아닌 평가용이며, 기본 컬럼명은 `BIOFIN 1차 카테고리`입니다.
-최근 취합 CSV는 `--gold-label-col "1차"`를 지정합니다.
+정답은 추론 입력이 아닌 평가용입니다. `--gold-label-col`을 생략하면
+`BIOFIN 1차 카테고리`, `1차 카테고리`, `1차` 중 존재하는 컬럼을 자동 인식합니다.
+후보가 여러 개라면 명시적으로 지정해야 하며, 지정한 컬럼이 없으면 실행 전에 오류를 냅니다.
 평가 가능한 정답·예측 쌍이 없으면 정확도 평가는 생략됩니다.
 
 ## 호출 없는 점검
@@ -18,7 +19,6 @@
 ```powershell
 python llm/v1/classify_biofin_category_with_ollama.py `
   --input-file "document/open/BIOFIN_2023_취합_2026.09.14.csv" `
-  --gold-label-col "1차" `
   --output-dir "outputs/llm/v1/input_check" `
   --dry-run
 ```
@@ -34,7 +34,6 @@ CSV에 문서 연결 정보가 없다면 문서 매칭 결과를 먼저 준비�
 ```powershell
 python llm/v1/classify_biofin_category_with_ollama.py `
   --input-file "document/open/BIOFIN_2023_취합_2026.09.14.csv" `
-  --gold-label-col "1차" `
   --ollama-url "<전달받은 접속 URL>" `
   --model "<서버에서 확인한 모델명>" `
   --workers 1 --limit-keys 1 --retries 0 `
@@ -59,4 +58,7 @@ python llm/v1/classify_biofin_category_with_ollama.py `
 예측 컬럼 기본값은 `LLM BIOFIN 1차 카테고리`이며 `--label-col`로 변경합니다.
 `confidence`, `reason`, `evidence`도 출력합니다.
 같은 출력 폴더로 재실행하면 유효 캐시를 재사용합니다.
+실패 행은 빈 예측값으로 남고 재실행 시 다시 처리합니다.
+응답 해석 실패 시 마지막 시도의 원문을 캐시·검수 CSV의 `raw_response`에 보존합니다.
+최종 `response`가 없거나 빈 서버 응답은 필드 목록과 종료 사유를 오류에 기록합니다.
 다른 모델을 비교할 때는 출력·캐시 폴더를 분리합니다.
