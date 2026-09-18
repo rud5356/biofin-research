@@ -32,6 +32,7 @@ LLM_DIR = Path(__file__).resolve().parents[1]
 if str(LLM_DIR) not in sys.path:
     sys.path.insert(0, str(LLM_DIR))
 from document_parser import DocumentParseError, extract_document  # noqa: E402
+from business_purpose import extract_business_purpose  # noqa: E402
 
 
 DEFAULT_MODEL = "gemma3:12b"
@@ -39,7 +40,7 @@ DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_INPUT_FILE = Path("document/2023biofin_label_matched.csv")
 DEFAULT_LABEL_COLUMN = "LLM BIOFIN 1차 카테고리"
 DEFAULT_GOLD_LABEL_COLUMN = "BIOFIN 1차 카테고리"
-PROMPT_VERSION = "kr-biofin-category-2026-09-08-v3"
+PROMPT_VERSION = "kr-biofin-category-2026-09-18-purpose-only-v1"
 VALID_LABELS = set(range(10))
 ENCODINGS = ("utf-8-sig", "cp949", "utf-8")
 
@@ -430,7 +431,7 @@ PROMPT_TEMPLATE = """\
 단위사업명: {단위사업명}
 세부사업명: {세부사업명}
 
-사업설명자료 본문:
+사업설명자료의 사업목적 항목(다른 항목은 제공하지 않음):
 {document_text}
 
 반드시 아래 JSON 객체만 반환하라.
@@ -496,7 +497,7 @@ def parse_args() -> argparse.Namespace:
         "--max-document-chars",
         type=int,
         default=16000,
-        help="프롬프트에 포함할 사업설명자료 본문 최대 문자 수",
+        help="프롬프트에 포함할 사업목적 최대 문자 수",
     )
     parser.add_argument(
         "--no-document-text",
@@ -676,8 +677,14 @@ def load_document_for_prompt(
         return "[사업설명자료 파일을 찾지 못함]", "NOT_FOUND", "", 0
     try:
         full_text = extract_document(path)
-        prompt_text = truncate_document(full_text, args.max_document_chars)
-        return prompt_text, "PARSED", str(path), len(prompt_text)
+        purpose = extract_business_purpose(full_text)
+        if not purpose:
+            return (
+                "[사업목적 항목 또는 종료 경계를 찾지 못함. 문서 본문 미사용]",
+                "PURPOSE_NOT_FOUND", str(path), 0,
+            )
+        prompt_text = purpose[:args.max_document_chars]
+        return prompt_text, "PURPOSE_EXTRACTED", str(path), len(prompt_text)
     except (DocumentParseError, RuntimeError, OSError) as exc:
         return (
             f"[사업설명자료 파싱 실패: {clean_cell(exc)[:300]}]",
@@ -740,6 +747,7 @@ def call_ollama(prompt: str, args: argparse.Namespace) -> str:
         "model": args.model,
         "prompt": prompt,
         "stream": False,
+        "think": False,
         "options": {"temperature": 0, "top_p": 0.1, "num_ctx": args.num_ctx},
     }
     if not args.no_json_format:
@@ -887,7 +895,7 @@ def valid_cached_label(record: dict[str, Any] | None) -> bool:
     if not record:
         return False
     if record.get("document_status") not in {
-        "PARSED", "NOT_FOUND", "PARSE_FAILED", "DISABLED"
+        "PURPOSE_EXTRACTED", "PURPOSE_NOT_FOUND", "NOT_FOUND", "PARSE_FAILED", "DISABLED"
     }:
         return False
     if record.get("prompt_version") != PROMPT_VERSION:
@@ -1092,6 +1100,8 @@ def classify_items(
                 f"label={record['label']} conf={record['confidence']} "
                 f"{item['input_text'][:70]}"
             )
+            if not valid_cached_label(record):
+                print(f"  {record['reason']}", file=sys.stderr, flush=True)
             if args.save_every > 0 and completed % args.save_every == 0:
                 save_cache(args.cache_csv, cache)
 
