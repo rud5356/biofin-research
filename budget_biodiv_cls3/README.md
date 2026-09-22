@@ -82,3 +82,9 @@ python transformer/v1/src/train_attention_classifier.py `
 
 Transformer의 옵션은 `--label_file`, `--dry_run`처럼 밑줄을,
 LLM은 `--input-file`, `--dry-run`처럼 하이픈을 사용합니다.
+
+## 전문가 검증 UI 프로토타입 (데모)
+
+`web/` 폴더에 분류 결과·전문가 검증 화면의 클릭 가능한 프론트엔드 프로토타입이 있습니다.
+실제 모델·서버·DB와 연결되지 않은 가상 데이터 데모이며, 위 Transformer/LLM/파이프라인 코드와는 독립적입니다.
+실행 방법은 [web/README.md](web/README.md)를 참고합니다.
