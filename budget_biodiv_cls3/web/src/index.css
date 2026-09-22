@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+@theme {
+  --color-navy-950: #0a1a30;
+  --color-navy-900: #0f2545;
+  --color-navy-800: #163460;
+  --color-navy-700: #1f4478;
+  --color-navy-600: #2c5796;
+  --color-teal-700: #0b6e63;
+  --color-teal-600: #0f8a7c;
+  --color-teal-500: #14a190;
+  --color-teal-100: #e3f5f2;
+  --color-page: #f4f6f8;
+  --color-surface: #ffffff;
+
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", system-ui, sans-serif;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-page);
+  color: #16233b;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #c6ccd6;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a8b0bd;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tailwind v4 arbitrary bracket values are unreliable in this environment's
+   oxide scanner, so fixed pixel sizes below the `text-xs` step and the
+   detail-panel column layout are defined as plain utility classes instead. */
+.text-2xs {
+  font-size: 11px;
+  line-height: 1rem;
+}
+.text-3xs {
+  font-size: 10px;
+  line-height: 0.875rem;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 1024px) {
+  .detail-grid {
+    grid-template-columns: 280px 1fr 360px;
+  }
+}
+
+@keyframes progress-stripe {
+  from { background-position: 0 0; }
+  to { background-position: 28px 0; }
+}
+.progress-stripe {
+  background-image: linear-gradient(45deg, rgba(255,255,255,0.25) 25%, transparent 25%, transparent 50%, rgba(255,255,255,0.25) 50%, rgba(255,255,255,0.25) 75%, transparent 75%, transparent);
+  background-size: 28px 28px;
+  animation: progress-stripe 1s linear infinite;
+}
