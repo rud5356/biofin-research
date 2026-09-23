@@ -7,6 +7,13 @@ import classify_biofin_category_with_ollama as classifier
 
 
 class ClassifierRegressionTests(unittest.TestCase):
+    def test_combined_purpose_content(self):
+        extract = classifier.extract_business_purpose
+        for title in ['1) 사업목적·내용', '4. 사업목적 및 내용', '□ 사업목적ㆍ내용']:
+            self.assertEqual(extract(title+'\n자연 보전\n5. 사업근거 및 추진경위\n법률'), '자연 보전')
+        self.assertEqual(extract('사업목적\n사업 내용은 생태계 보호다\n추진현황\n다른 내용'), '사업 내용은 생태계 보호다')
+        self.assertEqual(extract('일반 사업목적\n본문\n사업개요'), '')
+
     def test_purpose_section_boundaries(self):
         extract = classifier.extract_business_purpose
         self.assertEqual(

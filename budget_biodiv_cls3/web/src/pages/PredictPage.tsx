@@ -3,11 +3,11 @@ import { useNavigate } from 'react-router-dom'
 import { useAppStore } from '../store/useAppStore'
 import type { PredictionRun } from '../types'
 import { isUnclassified } from '../lib/derive'
-import { simulatePrediction } from '../lib/predictSim'
+import { simulatePrediction, type SimulatableModelKey } from '../lib/predictSim'
 import { Button } from '../components/common/Button'
 import { formatDateTime } from '../lib/format'
 
-const MODEL_OPTIONS: { key: PredictionRun['modelKey']; title: string; desc: string }[] = [
+const MODEL_OPTIONS: { key: SimulatableModelKey; title: string; desc: string }[] = [
   { key: 'transformer_v1', title: 'Transformer v1', desc: '상위 카테고리 0~9 분류' },
   { key: 'transformer_v2', title: 'Transformer v2', desc: '계층형 하위 코드 분류 (예: 6.05)' },
   { key: 'llm_v1', title: 'LLM v1', desc: 'Ollama 기반 상위 카테고리 0~9 분류' },
@@ -34,7 +34,7 @@ export function PredictPage() {
   const navigate = useNavigate()
 
   const [tab, setTab] = useState<(typeof TABS)[number]['key']>('registered')
-  const [modelKey, setModelKey] = useState<PredictionRun['modelKey']>('transformer_v1')
+  const [modelKey, setModelKey] = useState<SimulatableModelKey>('transformer_v1')
   const [runName, setRunName] = useState('신규 예측 실행')
   const [scope, setScope] = useState<PredictionRun['scope']>('전체')
   const [datasetName, setDatasetName] = useState(datasets[0]?.name ?? '')
@@ -76,12 +76,13 @@ export function PredictPage() {
       if (processed >= total) {
         window.clearInterval(intervalRef.current!)
         const run = useAppStore.getState().runs.find((r) => r.id === runId)
-        if (run) {
+        if (run && run.modelKey !== 'combined') {
+          const runModelKey = run.modelKey
           run.targetIds.forEach((pid) => {
             const program = useAppStore.getState().programs.find((p) => p.id === pid)
             if (!program) return
-            const pred = simulatePrediction(program, run.modelKey)
-            applyRunResult(runId, pid, run.modelKey, pred)
+            const pred = simulatePrediction(program, runModelKey)
+            applyRunResult(runId, pid, runModelKey, pred)
           })
         }
         setRunStatus(runId, '완료')

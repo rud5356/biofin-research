@@ -5,7 +5,9 @@ function pick<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)]
 }
 
-const MODEL_LABEL: Record<PredictionRun['modelKey'], string> = {
+export type SimulatableModelKey = Exclude<PredictionRun['modelKey'], 'combined'>
+
+const MODEL_LABEL: Record<SimulatableModelKey, string> = {
   transformer_v1: 'Transformer v1',
   transformer_v2: 'Transformer v2',
   llm_v1: 'LLM v1',
@@ -13,7 +15,7 @@ const MODEL_LABEL: Record<PredictionRun['modelKey'], string> = {
   pipeline: '단계별 파이프라인',
 }
 
-export function simulatePrediction(program: BudgetProgram, modelKey: PredictionRun['modelKey']): ModelPrediction {
+export function simulatePrediction(program: BudgetProgram, modelKey: SimulatableModelKey): ModelPrediction {
   const usesSub = modelKey === 'transformer_v2' || modelKey === 'llm_v2' || modelKey === 'pipeline'
   const top = pick(TOP_CATEGORIES.filter((c) => c.code !== '0' || Math.random() < 0.2))
   const subs = subCategoriesForTop(top.code)

@@ -59,11 +59,11 @@ export interface ExpertReview {
   history: ReviewHistoryEntry[]
 }
 
-export interface FundSource {
-  general: number // 일반회계 비중(원)
-  special: number // 특별회계
-  fund: number // 기금
+export interface FundSourceEntry {
+  label: string // 예: 일반회계, 국비, 시도비 — 데이터 출처에 따라 항목 구성이 다를 수 있음
+  amount: number
 }
+export type FundSource = FundSourceEntry[]
 
 export interface BudgetProgram {
   id: string // 원본 행 고유 ID, 자동 병합 금지
@@ -71,6 +71,7 @@ export interface BudgetProgram {
   ministry: string // 소관명
   field: string // 분야
   programName: string // 세부사업명
+  accountName?: string // 회계명(실데이터에만 존재)
   budgetAmount: number | null // 예산액(원), 정보 없음이면 null
   expenditureAmount: number | null
   balanceAmount: number | null
@@ -92,7 +93,7 @@ export interface BudgetProgram {
 export interface PredictionRun {
   id: string
   name: string
-  modelKey: 'transformer_v1' | 'transformer_v2' | 'llm_v1' | 'llm_v2' | 'pipeline'
+  modelKey: 'transformer_v1' | 'transformer_v2' | 'llm_v1' | 'llm_v2' | 'pipeline' | 'combined'
   modelLabel: string
   scope: '전체' | '선택 사업' | '미분류 사업'
   status: '대기' | '진행중' | '완료' | '오류' | '취소'

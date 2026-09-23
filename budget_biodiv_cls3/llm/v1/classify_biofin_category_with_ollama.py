@@ -40,7 +40,7 @@ DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_INPUT_FILE = Path("document/2023biofin_label_matched.csv")
 DEFAULT_LABEL_COLUMN = "LLM BIOFIN 1차 카테고리"
 DEFAULT_GOLD_LABEL_COLUMN = "BIOFIN 1차 카테고리"
-PROMPT_VERSION = "kr-biofin-category-2026-09-21-purpose-only-v2"
+PROMPT_VERSION = "kr-biofin-category-2026-09-22-purpose-content-v3"
 VALID_LABELS = set(range(10))
 ENCODINGS = ("utf-8-sig", "cp949", "utf-8")
 
@@ -87,7 +87,7 @@ SYSTEM_PROMPT = """\
 
 ## STEP 0. 증거 확인과 규칙 우선순위
 
-입력은 예산 메타데이터와 추출된 사업목적이다. 사업내용·법적 근거의 별도 본문은 제공되지 않는다.
+입력은 예산 메타데이터와 추출된 사업목적 또는 사업목적·내용 결합 항목이다. 결합 항목에 적힌 수행 활동도 판단 근거로 사용한다. 사업개요·법적 근거 등의 별도 항목은 제공되지 않는다.
 사업목적 미발견·파싱 실패·문서 미발견 안내문은 추출 상태이며 사업의 실제 목적이 아니다.
 목적이 없더라도 세부사업명·상위사업명에 구체적인 대상과 활동이 명시되어 있으면 그 증거를 사용한다.
 '환경', '바이오', '연구' 같은 단어 하나와 '생활하수 처리', '가축전염병 방역', 'TAC 참여' 같은 구체적인 활동을 구별한다.
@@ -487,7 +487,7 @@ PROMPT_TEMPLATE = """\
 단위사업명: {단위사업명}
 세부사업명: {세부사업명}
 
-사업설명자료의 사업목적 항목(다른 항목은 제공하지 않음):
+사업설명자료의 사업목적 또는 사업목적·내용 항목(다음 별도 항목 전까지):
 {document_text}
 
 반드시 아래 JSON 객체만 반환하라.

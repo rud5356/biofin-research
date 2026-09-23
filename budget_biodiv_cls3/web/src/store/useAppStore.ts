@@ -11,8 +11,18 @@ import type {
   TopCode,
 } from '../types'
 import { buildSeedPrograms, buildSeedRuns, REVIEWERS, SEED_DATASETS } from '../data/seed'
+import { buildRealUlsanPrograms, RUN_REAL_ULSAN_2024 } from '../data/realUlsan2024'
 
 const STORAGE_KEY = 'biofin-cls3-demo-store'
+
+const MODEL_LABELS: Record<PredictionRun['modelKey'], string> = {
+  transformer_v1: 'Transformer v1',
+  transformer_v2: 'Transformer v2',
+  llm_v1: 'LLM v1',
+  llm_v2: 'LLM v2',
+  pipeline: '단계별 파이프라인',
+  combined: 'Transformer v1 + LLM v1 (실데이터)',
+}
 
 function nowIso() {
   return new Date().toISOString()
@@ -21,7 +31,7 @@ function nowIso() {
 function makeInitialState() {
   const programs = buildSeedPrograms()
   const runs = buildSeedRuns(programs)
-  return { programs, runs, datasets: SEED_DATASETS, reviewers: REVIEWERS.map((r) => ({ ...r })) }
+  return { programs, runs, datasets: SEED_DATASETS, reviewers: REVIEWERS.map((r) => ({ ...r })), realDataLoaded: false }
 }
 
 export interface SaveReviewInput {
@@ -46,6 +56,7 @@ interface AppState {
   datasets: RegisteredDataset[]
   reviewers: Reviewer[]
   columnPrefs: Record<string, boolean>
+  realDataLoaded: boolean
 
   saveReview: (input: SaveReviewInput) => void
   bulkApprove: (ids: string[], source: PredictionSource) => BulkApproveResult
@@ -60,6 +71,7 @@ interface AppState {
 
   addDataset: (ds: RegisteredDataset) => void
   linkDocument: (id: string) => void
+  loadRealDataset: () => void
 
   resetDemo: () => void
 }
@@ -170,16 +182,7 @@ export const useAppStore = create<AppState>()(
           id,
           name: input.name,
           modelKey: input.modelKey,
-          modelLabel:
-            input.modelKey === 'transformer_v1'
-              ? 'Transformer v1'
-              : input.modelKey === 'transformer_v2'
-                ? 'Transformer v2'
-                : input.modelKey === 'llm_v1'
-                  ? 'LLM v1'
-                  : input.modelKey === 'llm_v2'
-                    ? 'LLM v2'
-                    : '단계별 파이프라인',
+          modelLabel: MODEL_LABELS[input.modelKey],
           scope: input.scope,
           status: '대기',
           createdAt: nowIso(),
@@ -226,6 +229,44 @@ export const useAppStore = create<AppState>()(
 
       addDataset: (ds) => set((state) => ({ datasets: [ds, ...state.datasets] })),
 
+      loadRealDataset: () => {
+        if (get().realDataLoaded) return
+        const realPrograms = buildRealUlsanPrograms()
+        const now = nowIso()
+        const run: PredictionRun = {
+          id: RUN_REAL_ULSAN_2024,
+          name: '울산광역시 환경분야 2024 실데이터 분류',
+          modelKey: 'combined',
+          modelLabel: MODEL_LABELS.combined,
+          scope: '전체',
+          status: '완료',
+          createdAt: now,
+          finishedAt: now,
+          totalCount: realPrograms.length,
+          processedCount: realPrograms.length,
+          failedCount: 0,
+          targetIds: realPrograms.map((p) => p.id),
+          datasetName: '울산_환경_2024 모델 카테고리 분류 결과.CSV',
+        }
+        set((state) => ({
+          programs: [...realPrograms, ...state.programs],
+          runs: [run, ...state.runs],
+          datasets: [
+            {
+              id: 'ds-real-ulsan-2024',
+              name: '울산_환경_2024 모델 카테고리 분류 결과.CSV (실데이터)',
+              rowCount: realPrograms.length,
+              year: 2024,
+              registeredAt: now,
+              amountUnit: '원',
+              encoding: 'CP949',
+            },
+            ...state.datasets,
+          ],
+          realDataLoaded: true,
+        }))
+      },
+
       linkDocument: (id) =>
         set((state) => ({
           programs: state.programs.map((p) =>
@@ -239,6 +280,7 @@ export const useAppStore = create<AppState>()(
         localStorage.removeItem(STORAGE_KEY)
         set({ ...makeInitialState(), columnPrefs: { transformerConfidence: false, llmConfidence: false } })
       },
+      // realDataLoaded already reset via makeInitialState() above
     }),
     { name: STORAGE_KEY },
   ),

@@ -11,6 +11,8 @@ export function DataManagementPage() {
   const programs = useAppStore((s) => s.programs)
   const linkDocument = useAppStore((s) => s.linkDocument)
   const addDataset = useAppStore((s) => s.addDataset)
+  const realDataLoaded = useAppStore((s) => s.realDataLoaded)
+  const loadRealDataset = useAppStore((s) => s.loadRealDataset)
 
   const [encoding, setEncoding] = useState<'UTF-8' | 'CP949'>('UTF-8')
   const [csvHeaders, setCsvHeaders] = useState<string[]>([])
@@ -92,6 +94,25 @@ export function DataManagementPage() {
       <div>
         <h1 className="text-base font-semibold text-navy-900">데이터·문서 관리</h1>
         <p className="mt-0.5 text-xs text-slate-500">등록 데이터와 사업설명자료 연결 상태를 관리합니다. 업로드는 데모이며 서버에 저장되지 않습니다.</p>
+      </div>
+
+      <div className="rounded-lg border border-teal-500/30 bg-teal-50/50 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-navy-900">실제 데이터 — 울산광역시 환경분야 2024</h2>
+            <p className="mt-0.5 text-2xs text-slate-500">
+              crawlers/open_fiscal로 수집한 실제 세부사업 355건 + Transformer v1·LLM v1 실제 예측 결과. 아직 전문가 검토 전 상태로 불러와
+              분류결과·전문가 검증 화면에서 실제로 검토할 수 있습니다.
+            </p>
+          </div>
+          {realDataLoaded ? (
+            <span className="rounded border border-teal-500/40 bg-white px-3 py-1.5 text-xs font-medium text-teal-700">불러오기 완료 (355건 반영됨)</span>
+          ) : (
+            <Button variant="secondary" onClick={loadRealDataset}>
+              실제 데이터 불러오기 →
+            </Button>
+          )}
+        </div>
       </div>
 
       <div className="rounded-lg border border-slate-200 bg-white p-4">

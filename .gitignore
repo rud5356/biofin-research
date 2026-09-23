@@ -27,6 +27,10 @@ node_modules/
 **/db/
 **/experiments/
 
+# 예외: web 프론트엔드의 src/data/는 생성물이 아니라 앱이 import하는 소스 데이터
+!budget_biodiv_cls3/web/src/data/
+!budget_biodiv_cls3/web/src/data/**
+
 # 내역사업 분류 복사본 (원본 HWP 파일 복사본, 재생성 가능)
 국가생물다양성_열린재정 데이터/내역사업있음/
 
