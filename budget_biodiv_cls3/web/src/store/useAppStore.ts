@@ -10,7 +10,7 @@ import type {
   Reviewer,
   TopCode,
 } from '../types'
-import { buildSeedPrograms, buildSeedRuns, REVIEWERS, SEED_DATASETS } from '../data/seed'
+import { buildSeedPrograms, buildSeedRuns, emptyReview, REVIEWERS, SEED_DATASETS } from '../data/seed'
 import { buildRealUlsanPrograms, RUN_REAL_ULSAN_2024 } from '../data/realUlsan2024'
 
 const STORAGE_KEY = 'biofin-cls3-demo-store'
@@ -72,6 +72,8 @@ interface AppState {
   addDataset: (ds: RegisteredDataset) => void
   linkDocument: (id: string) => void
   loadRealDataset: () => void
+  addManualProgram: (input: { programName: string; ministry: string; field: string; year: number; budgetAmount: number | null; documentPreview: string | null }) => string
+  assignReviewer: (programId: string, reviewerName: string) => void
 
   resetDemo: () => void
 }
@@ -228,6 +230,40 @@ export const useAppStore = create<AppState>()(
       },
 
       addDataset: (ds) => set((state) => ({ datasets: [ds, ...state.datasets] })),
+
+      addManualProgram: (input) => {
+        const id = `MANUAL-${Date.now()}`
+        const program: BudgetProgram = {
+          id,
+          year: input.year,
+          ministry: input.ministry || '직접입력',
+          field: input.field || '미지정',
+          programName: input.programName,
+          budgetAmount: input.budgetAmount,
+          expenditureAmount: null,
+          balanceAmount: null,
+          fundSource: null,
+          documentStatus: input.documentPreview ? '연결됨' : '없음',
+          documentPreview: input.documentPreview,
+          predictionRunId: null,
+          transformer_v1: null,
+          transformer_v2: null,
+          llm_v1: null,
+          llm_v2: null,
+          pipeline: null,
+          expertReview: emptyReview(),
+          assignee: null,
+          goldTopCategory: null,
+          goldSubCategory: null,
+        }
+        set((state) => ({ programs: [program, ...state.programs] }))
+        return id
+      },
+
+      assignReviewer: (programId, reviewerName) =>
+        set((state) => ({
+          programs: state.programs.map((p) => (p.id === programId ? { ...p, assignee: reviewerName } : p)),
+        })),
 
       loadRealDataset: () => {
         if (get().realDataLoaded) return

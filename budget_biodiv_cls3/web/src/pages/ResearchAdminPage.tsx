@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useAppStore } from '../store/useAppStore'
-import { TOP_CATEGORIES, SUB_CATEGORIES } from '../data/categories'
+import { TOP_CATEGORIES, SUB_CATEGORIES, TRANSFORMER_V2_SUPPORTED_CODES } from '../data/categories'
 import { formatDateTime } from '../lib/format'
 import { Button } from '../components/common/Button'
 
@@ -294,6 +294,10 @@ function CriteriaTab() {
         <h2 className="text-sm font-semibold text-navy-900">분류 기준</h2>
         <span className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-2xs text-slate-500">기준 버전 v2026.09</span>
       </div>
+      <p className="mb-3 text-2xs text-slate-400">
+        Transformer v2 지원 코드: {TRANSFORMER_V2_SUPPORTED_CODES.size}/{SUB_CATEGORIES.length} (선택한 모델 버전의 라벨맵 기준 — 데모는 전체 지원).
+        라벨맵에 없는 하위 코드는 Transformer v2 예측 대상에서 제외되고 LLM v2로 보완합니다.
+      </p>
       <div className="space-y-2">
         {TOP_CATEGORIES.map((c) => (
           <div key={c.code} className="rounded border border-slate-200">
@@ -379,6 +383,10 @@ function RunsTab() {
 function AssigneeTab() {
   const programs = useAppStore((s) => s.programs)
   const reviewers = useAppStore((s) => s.reviewers)
+  const assignReviewer = useAppStore((s) => s.assignReviewer)
+  const [pendingPicks, setPendingPicks] = useState<Record<string, string>>({})
+
+  const unassigned = useMemo(() => programs.filter((p) => p.assignee === null), [programs])
 
   const stats = useMemo(
     () =>
@@ -419,6 +427,50 @@ function AssigneeTab() {
           ))}
         </tbody>
       </table>
+
+      <h3 className="mt-5 mb-2 text-sm font-semibold text-navy-900">미배정 사업 ({unassigned.length}건) — 담당자 배정</h3>
+      {unassigned.length === 0 ? (
+        <div className="text-2xs text-slate-400">모든 사업에 담당자가 배정되어 있습니다.</div>
+      ) : (
+        <div className="max-h-64 overflow-y-auto rounded border border-slate-200">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-slate-50 text-2xs text-slate-400">
+              <tr>
+                <th className="border-b border-slate-200 px-2 py-1.5 text-left">사업명</th>
+                <th className="border-b border-slate-200 px-2 py-1.5 text-left">검토 상태</th>
+                <th className="border-b border-slate-200 px-2 py-1.5 text-left">담당자 지정</th>
+                <th className="border-b border-slate-200 px-2 py-1.5"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {unassigned.map((p) => (
+                <tr key={p.id} className="border-b border-slate-100">
+                  <td className="px-2 py-1.5 text-slate-700">{p.programName}</td>
+                  <td className="px-2 py-1.5 text-slate-500">{p.expertReview.status}</td>
+                  <td className="px-2 py-1.5">
+                    <select
+                      className="h-7 rounded border border-slate-300 bg-white px-1.5 text-2xs"
+                      value={pendingPicks[p.id] ?? reviewers[0]?.name ?? ''}
+                      onChange={(e) => setPendingPicks((m) => ({ ...m, [p.id]: e.target.value }))}
+                    >
+                      {reviewers.map((r) => (
+                        <option key={r.id} value={r.name}>
+                          {r.name} ({r.team})
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="px-2 py-1.5 text-right">
+                    <Button size="sm" variant="outline" onClick={() => assignReviewer(p.id, pendingPicks[p.id] ?? reviewers[0]?.name ?? '')}>
+                      배정
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }

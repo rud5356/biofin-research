@@ -31,6 +31,7 @@ export function PredictPage() {
   const finishRunFinishedAt = useAppStore((s) => s.finishRunFinishedAt)
   const applyRunResult = useAppStore((s) => s.applyRunResult)
   const retryRun = useAppStore((s) => s.retryRun)
+  const addManualProgram = useAppStore((s) => s.addManualProgram)
   const navigate = useNavigate()
 
   const [tab, setTab] = useState<(typeof TABS)[number]['key']>('registered')
@@ -41,6 +42,9 @@ export function PredictPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [simulateError, setSimulateError] = useState(false)
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
+  const [manualName, setManualName] = useState('')
+  const [manualMinistry, setManualMinistry] = useState('')
+  const [manualBudget, setManualBudget] = useState('')
   const [manualText, setManualText] = useState('')
   const intervalRef = useRef<number | null>(null)
 
@@ -92,6 +96,26 @@ export function PredictPage() {
   }
 
   function handleStart() {
+    if (tab === 'manual') {
+      if (!manualName.trim()) {
+        alert('사업명을 입력해 주세요.')
+        return
+      }
+      const newId = addManualProgram({
+        programName: manualName.trim(),
+        ministry: manualMinistry.trim(),
+        field: '미지정',
+        year: new Date().getFullYear(),
+        budgetAmount: manualBudget ? Number(manualBudget) : null,
+        documentPreview: manualText.trim() ? manualText.trim() : null,
+      })
+      const id = createRun({ name: runName, modelKey, scope: '선택 사업', targetIds: [newId], datasetName: '단일 사업 직접 입력' })
+      setActiveRunId(id)
+      setRunStatus(id, '진행중')
+      runInterval(id, 1)
+      return
+    }
+
     if (targetIds.length === 0) {
       alert('처리 대상 사업이 없습니다. 처리 범위를 확인해 주세요.')
       return
@@ -160,15 +184,46 @@ export function PredictPage() {
             </div>
           )}
           {tab === 'manual' && (
-            <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">사업 설명 직접 입력 (데모)</label>
-              <textarea
-                className="w-full rounded border border-slate-300 p-2 text-xs"
-                rows={3}
-                value={manualText}
-                onChange={(e) => setManualText(e.target.value)}
-                placeholder="사업명·사업 목적을 입력하면 단일 사업 분류 데모에 사용됩니다. (실제 저장되지 않는 데모 입력입니다)"
-              />
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-600">사업명 *필수</label>
+                <input
+                  className="h-8 w-full rounded border border-slate-300 px-2 text-xs"
+                  value={manualName}
+                  onChange={(e) => setManualName(e.target.value)}
+                  placeholder="예: OO 생태복원 시범사업"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-600">소관명(선택)</label>
+                <input
+                  className="h-8 w-full rounded border border-slate-300 px-2 text-xs"
+                  value={manualMinistry}
+                  onChange={(e) => setManualMinistry(e.target.value)}
+                  placeholder="예: 환경부"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-600">예산액(원, 선택)</label>
+                <input
+                  type="number"
+                  className="h-8 w-full rounded border border-slate-300 px-2 text-xs"
+                  value={manualBudget}
+                  onChange={(e) => setManualBudget(e.target.value)}
+                  placeholder="예: 500000000"
+                />
+              </div>
+              <div className="md:col-span-2">
+                <label className="mb-1 block text-xs font-medium text-slate-600">사업 목적·설명(선택)</label>
+                <textarea
+                  className="w-full rounded border border-slate-300 p-2 text-xs"
+                  rows={3}
+                  value={manualText}
+                  onChange={(e) => setManualText(e.target.value)}
+                  placeholder="사업 목적을 입력하면 문서 기반 분류 데모에 사용됩니다. 비워두면 예산정보만 사용한 것으로 처리됩니다."
+                />
+              </div>
+              <p className="md:col-span-2 text-2xs text-slate-400">여기서 만든 사업은 이 브라우저의 분류결과 목록에 실제로 추가되어 검토까지 이어서 체험할 수 있습니다.</p>
             </div>
           )}
 
@@ -198,23 +253,29 @@ export function PredictPage() {
                 <label className="mb-1 block text-xs font-medium text-slate-600">실행 이름</label>
                 <input className="h-8 w-full rounded border border-slate-300 px-2 text-xs" value={runName} onChange={(e) => setRunName(e.target.value)} />
               </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-slate-600">처리 범위</label>
-                <div className="flex gap-1.5">
-                  {(['전체', '선택 사업', '미분류 사업'] as PredictionRun['scope'][]).map((s) => (
-                    <button
-                      key={s}
-                      onClick={() => setScope(s)}
-                      className={`rounded-md border px-2.5 py-1 text-xs font-medium ${scope === s ? 'border-navy-900 bg-navy-900 text-white' : 'border-slate-300 bg-white text-slate-600'}`}
-                    >
-                      {s}
-                    </button>
-                  ))}
+              {tab === 'manual' ? (
+                <div className="rounded border border-slate-200 bg-slate-50 px-2.5 py-2 text-2xs text-slate-500">
+                  처리 범위: 위에서 입력한 사업 1건 (단일 사업 직접 입력)
                 </div>
-                <div className="mt-1 text-2xs text-slate-400">대상 {targetIds.length.toLocaleString('ko-KR')}건</div>
-              </div>
+              ) : (
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-600">처리 범위</label>
+                  <div className="flex gap-1.5">
+                    {(['전체', '선택 사업', '미분류 사업'] as PredictionRun['scope'][]).map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => setScope(s)}
+                        className={`rounded-md border px-2.5 py-1 text-xs font-medium ${scope === s ? 'border-navy-900 bg-navy-900 text-white' : 'border-slate-300 bg-white text-slate-600'}`}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-1 text-2xs text-slate-400">대상 {targetIds.length.toLocaleString('ko-KR')}건</div>
+                </div>
+              )}
 
-              {scope === '선택 사업' && (
+              {tab !== 'manual' && scope === '선택 사업' && (
                 <div className="max-h-40 space-y-1 overflow-y-auto rounded border border-slate-200 p-2">
                   {programs.map((p) => (
                     <label key={p.id} className="flex items-center gap-2 text-2xs text-slate-600">
@@ -239,7 +300,11 @@ export function PredictPage() {
                 오류 상황 데모(진행 중 오류 발생시키기)
               </label>
 
-              <Button variant="primary" onClick={handleStart} disabled={!!activeRun && (activeRun.status === '진행중')}>
+              <Button
+                variant="primary"
+                onClick={handleStart}
+                disabled={(!!activeRun && activeRun.status === '진행중') || (tab === 'manual' && !manualName.trim())}
+              >
                 예측 시작
               </Button>
             </div>

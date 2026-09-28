@@ -3,6 +3,7 @@ import { useAppStore } from '../store/useAppStore'
 import { formatDate } from '../lib/format'
 import { Button } from '../components/common/Button'
 import { DocumentStatusBadge } from '../components/common/Badge'
+import { LoadingState } from '../components/common/Modal'
 
 const REQUIRED_FIELDS = ['회계연도', '소관명', '사업명', '예산액', '사업 ID', '정답 상위 카테고리', '정답 하위 카테고리'] as const
 
@@ -20,26 +21,51 @@ export function DataManagementPage() {
   const [fileName, setFileName] = useState<string | null>(null)
   const [mapping, setMapping] = useState<Record<string, string>>({})
   const [uploaded, setUploaded] = useState(false)
+  const [isParsing, setIsParsing] = useState(false)
+  const [parseError, setParseError] = useState<string | null>(null)
+  const [isLoadingReal, setIsLoadingReal] = useState(false)
 
   async function handleFile(file: File) {
     setFileName(file.name)
     setUploaded(false)
-    let text: string
+    setParseError(null)
+    setCsvHeaders([])
+    setCsvRows([])
+    setIsParsing(true)
     try {
-      const buf = await file.arrayBuffer()
-      text = new TextDecoder(encoding === 'CP949' ? 'euc-kr' : 'utf-8').decode(buf)
+      let text: string
+      try {
+        const buf = await file.arrayBuffer()
+        text = new TextDecoder(encoding === 'CP949' ? 'euc-kr' : 'utf-8').decode(buf)
+      } catch {
+        text = await file.text()
+      }
+      const lines = text.split(/\r\n|\n/).filter((l) => l.trim().length > 0).slice(0, 21)
+      if (lines.length < 2) {
+        setParseError('헤더와 데이터 행을 확인할 수 없습니다. 올바른 CSV 파일인지, 인코딩 선택이 맞는지 확인해 주세요.')
+        return
+      }
+      const parsed = lines.map((l) => l.split(','))
+      setCsvHeaders(parsed[0] ?? [])
+      setCsvRows(parsed.slice(1))
+      const initialMap: Record<string, string> = {}
+      REQUIRED_FIELDS.forEach((f) => {
+        initialMap[f] = ''
+      })
+      setMapping(initialMap)
     } catch {
-      text = await file.text()
+      setParseError('파일을 읽는 중 오류가 발생했습니다. 다른 파일로 다시 시도해 주세요.')
+    } finally {
+      setIsParsing(false)
     }
-    const lines = text.split(/\r\n|\n/).filter((l) => l.trim().length > 0).slice(0, 21)
-    const parsed = lines.map((l) => l.split(','))
-    setCsvHeaders(parsed[0] ?? [])
-    setCsvRows(parsed.slice(1))
-    const initialMap: Record<string, string> = {}
-    REQUIRED_FIELDS.forEach((f) => {
-      initialMap[f] = ''
-    })
-    setMapping(initialMap)
+  }
+
+  function handleLoadReal() {
+    setIsLoadingReal(true)
+    window.setTimeout(() => {
+      loadRealDataset()
+      setIsLoadingReal(false)
+    }, 600)
   }
 
   const primaryCol = mapping['정답 상위 카테고리']
@@ -107,8 +133,13 @@ export function DataManagementPage() {
           </div>
           {realDataLoaded ? (
             <span className="rounded border border-teal-500/40 bg-white px-3 py-1.5 text-xs font-medium text-teal-700">불러오기 완료 (355건 반영됨)</span>
+          ) : isLoadingReal ? (
+            <span className="flex items-center gap-2 rounded border border-teal-500/40 bg-white px-3 py-1.5 text-xs font-medium text-teal-700">
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-teal-200 border-t-teal-600" />
+              불러오는 중…
+            </span>
           ) : (
-            <Button variant="secondary" onClick={loadRealDataset}>
+            <Button variant="secondary" onClick={handleLoadReal}>
               실제 데이터 불러오기 →
             </Button>
           )}
@@ -161,7 +192,13 @@ export function DataManagementPage() {
           </div>
         </div>
 
-        {csvHeaders.length > 0 && (
+        {isParsing && <LoadingState label="CSV 파일을 읽는 중입니다…" />}
+
+        {parseError && (
+          <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{parseError}</div>
+        )}
+
+        {!isParsing && csvHeaders.length > 0 && (
           <div className="mt-4 space-y-4">
             <div>
               <h3 className="mb-1.5 text-xs font-semibold text-slate-600">컬럼 매핑</h3>
