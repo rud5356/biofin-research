@@ -1,5 +1,8 @@
 import argparse
+import csv
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +10,29 @@ import classify_biofin_category_with_ollama as classifier
 
 
 class ClassifierRegressionTests(unittest.TestCase):
+    def test_editor_saved_tsv_roundtrip_to_excel_csv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'edited.csv'
+            headers = ['세부사업명', 'reason', 'label']
+            expected = [{'세부사업명': '환경 연구', 'reason': '쉼표, 인용 "근거"\n다음 줄', 'label': '2'}]
+            with source.open('w', encoding='cp949', newline='') as stream:
+                writer = csv.DictWriter(stream, fieldnames=headers, delimiter='\t')
+                writer.writeheader()
+                writer.writerows(expected)
+            actual_headers, rows, encoding = classifier.read_csv(source)
+            self.assertEqual((actual_headers, rows, encoding), (headers, expected, 'cp949'))
+            output = Path(directory) / 'output.csv'
+            classifier.write_csv(output, headers, rows)
+            self.assertTrue(output.read_bytes().startswith(b'\xef\xbb\xbf'))
+            self.assertEqual(classifier.read_csv(output)[:2], (headers, expected))
+
+    def test_rejects_misaligned_csv_columns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'bad.csv'
+            path.write_text('name,label\nitem,2,extra\n', encoding='utf-8-sig')
+            with self.assertRaises(ValueError):
+                classifier.read_csv(path)
+
     def test_combined_purpose_content(self):
         extract = classifier.extract_business_purpose
         for title in ['1) 사업목적·내용', '4. 사업목적 및 내용', '□ 사업목적ㆍ내용']:
