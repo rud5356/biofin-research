@@ -21,6 +21,7 @@ except ImportError:  # --dry_run은 모델 패키지 설치 전에도 실행 가
 
 from document_parser import DocumentParseError, SUPPORTED_EXTENSIONS, extract_document
 from utils import read_csv_flexible, safe_scalar
+from augmentation_csv import read_original_frame
 
 
 LOGGER = logging.getLogger("budget_document_classifier")
@@ -141,9 +142,10 @@ def load_label_data(
 
     frames: list[pd.DataFrame] = []
     for path in files:
-        frame = read_csv_flexible(path)
+        frame = read_original_frame(path)
         frame["_source_file"] = str(path.resolve())
-        frame["_source_row"] = range(2, len(frame) + 2)  # 헤더를 고려한 실제 CSV 행 번호
+        if "_source_row" not in frame:
+            frame["_source_row"] = range(2, len(frame) + 2)  # 헤더를 고려한 실제 CSV 행 번호
         frames.append(frame)
     labels = pd.concat(frames, ignore_index=True)
     missing = sorted((REQUIRED_COLUMNS | {label_column}) - set(labels.columns))
@@ -279,6 +281,8 @@ def match_documents_to_labels(
             successes.append(
                 {
                     **identity,
+                    "ministry": safe_scalar(row["소관명"]),
+                    "activity_name": safe_scalar(row["세부사업명"]),
                     "label": int(row["_label"]),
                     "match_type": "EXPLICIT_DOCUMENT_PATH",
                     "source_file": row["_source_file"],
@@ -347,6 +351,10 @@ def match_documents_to_labels(
         successes.append(
             {
                 **identity,
+                # Group original documents and their augmentations by the same
+                # matched CSV identity, never the filename's budget-code suffix.
+                "ministry": safe_scalar(row["소관명"]),
+                "activity_name": safe_scalar(row["세부사업명"]),
                 "label": int(row["_label"]),
                 "match_type": match_type,
                 "source_file": row["_source_file"],

@@ -34,6 +34,7 @@ from build_dataset import (
     match_documents_to_labels,
 )
 from document_parser import DocumentParseError, extract_document
+from augmentation_csv import append_train_augmentations, is_merged
 from utils import configure_logging, ensure_dir, is_cuda_oom, set_seed, write_csv, write_json
 
 
@@ -231,6 +232,23 @@ def run_dry_run(
         )
     if len(samples) < 3:
         LOGGER.warning("본문 추출 성공 샘플이 %d개뿐입니다. 실패 로그를 확인하세요.", len(samples))
+    if is_merged(args.label_file):
+        candidates = training_candidates.to_dict("records")
+        train_candidates, valid_candidates, test_candidates = split_records_three_way(
+            candidates, args.valid_ratio, args.test_ratio, args.seed
+        )
+        if args.undersample_majority:
+            train_candidates, _ = undersample_majority_records(
+                train_candidates, args.majority_label,
+                args.majority_cap_multiplier, args.majority_cap_min, args.seed
+            )
+        _, augmentation_summary = append_train_augmentations(
+            args.label_file, train_candidates, valid_candidates, test_candidates, build_business_group_key
+        )
+        augmentation_summary["dry_run_estimate"] = True
+        augmentation_summary["note"] = "문서 전체 파싱 전 추정치; 실제 학습에서 다시 계산"
+        write_json(augmentation_summary, output_dir / "augmentation_summary.json")
+        LOGGER.info("[dry-run] 증강 연결 예상: %s", augmentation_summary)
     LOGGER.info("dry-run 완료: %s", output_dir)
     return 0
 
@@ -716,6 +734,13 @@ def train(args: argparse.Namespace, records: list[dict[str, Any]], output_dir: P
             undersampling_summary,
             output_dir / "train_undersampling_summary.json",
         )
+    train_records, augmentation_summary = append_train_augmentations(
+        args.label_file, train_records, valid_records, test_records, build_business_group_key
+    )
+    if augmentation_summary:
+        LOGGER.info("증강 CSV 반영: %s", augmentation_summary)
+        write_json(augmentation_summary, output_dir / "augmentation_summary.json")
+        save_split_outputs(train_records, valid_records, test_records, output_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     train_dataset = BudgetDocumentDataset(
         train_records, tokenizer, max_length=args.max_length, stride=args.stride
