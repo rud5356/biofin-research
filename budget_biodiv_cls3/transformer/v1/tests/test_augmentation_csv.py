@@ -113,3 +113,55 @@ def test_augmentation_rejects_shared_train_and_heldout_group(tmp_path):
     record = {'ministry': '부처', 'activity_name': '같은사업'}
     with pytest.raises(ValueError, match='overlap'):
         append_train_augmentations(path, [record], [record], [], build_business_group_key)
+
+
+def test_class_cap_keeps_originals_balances_parents_and_excludes_heldout(tmp_path):
+    from collections import Counter
+    path = tmp_path / 'merged.csv'
+    originals = []
+    train, valid = [], []
+    for label in (1, 3):
+        for i in range(3):
+            key = f'{label}-{i}'
+            originals.append({'business_key': key, '회계연도': '2023', '소관명': '부처',
+                              '세부사업명': key, 'BIOFIN 1차 카테고리': str(label),
+                              'row_type': 'original', 'training_eligible': '1',
+                              'augmented_text': '', 'augmentation_id': '', 'source_business_key': ''})
+            (valid if i == 2 else train).append({'ministry': '부처', 'activity_name': key, 'label': label})
+    rows = list(originals)
+    for parent in originals:
+        for j in range(10):
+            key = parent['business_key']
+            rows.append({**parent, 'row_type': 'augmentation', 'source_business_key': key,
+                         'augmentation_id': f'{key}-{j}', 'augmented_text': f'text {key} {j}'})
+    write_csv(path, rows)
+    args = (path, train, valid, [], build_business_group_key)
+    result, summary = append_train_augmentations(*args, per_class=5, seed=42)
+    again, _ = append_train_augmentations(*args, per_class=5, seed=42)
+    assert result == again
+    assert result[:len(train)] == train
+    assert len(result) == len(train) + 10
+    assert summary['added_by_category'] == {'1': 5, '3': 5}
+    assert summary['excluded_heldout'] == 20
+    assert summary['excluded_by_limit'] == 30
+    counts = Counter(r['source_business_key'] for r in result[len(train):])
+    assert sorted(counts.values()) == [2, 2, 3, 3]
+    assert not any(k.endswith('-2') for k in counts)
+    only_original, summary = append_train_augmentations(*args, per_class=0)
+    assert only_original == train and summary['added_to_train'] == 0
+    full, _ = append_train_augmentations(*args)
+    assert len(full) == len(train) + 40
+    with pytest.raises(ValueError):
+        append_train_augmentations(*args, per_class=-1)
+
+
+def test_cli_accepts_controlled_augmentation_and_step_validation():
+    from train_attention_classifier import build_argument_parser, validate_arguments
+    for cap in ('0', '300'):
+        args = build_argument_parser().parse_args([
+            '--augmentation_per_class', cap, '--eval_steps', '500', '--learning_rate', '5e-6'])
+        validate_arguments(args)
+        assert not args.class_weight and not args.balanced_sampling and not args.undersample_majority
+    args.eval_steps = -1
+    with pytest.raises(ValueError):
+        validate_arguments(args)

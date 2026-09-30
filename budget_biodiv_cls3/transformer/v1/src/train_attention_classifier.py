@@ -58,6 +58,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label_column", default="BIOFIN 1차 카테고리")
     parser.add_argument("--num_labels", type=int, default=10, help="BIOFIN 1차 카테고리 0~9")
     parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--augmentation_per_class", type=int, default=None,
+                        help="클래스당 증강 상한(원본 사업별 균등 선택). 0=원본만, 생략=전체 증강")
+    parser.add_argument("--eval_steps", type=int, default=0,
+                        help="중간 검증 간격(학습 batch 수). 0=epoch 종료 시만 검증")
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--stride", type=int, default=128, help="인접 chunk 사이에 겹칠 token 수")
@@ -111,6 +115,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 def validate_arguments(args: argparse.Namespace) -> None:
+    if args.augmentation_per_class is not None and args.augmentation_per_class < 0:
+        raise ValueError("augmentation_per_class는 0 이상이어야 합니다")
+    if args.eval_steps < 0:
+        raise ValueError("eval_steps는 0 이상이어야 합니다")
     if args.epochs < 1:
         raise ValueError("epochs는 1 이상이어야 합니다")
     if args.batch_size < 1:
@@ -243,7 +251,8 @@ def run_dry_run(
                 args.majority_cap_multiplier, args.majority_cap_min, args.seed
             )
         _, augmentation_summary = append_train_augmentations(
-            args.label_file, train_candidates, valid_candidates, test_candidates, build_business_group_key
+            args.label_file, train_candidates, valid_candidates, test_candidates, build_business_group_key,
+            per_class=args.augmentation_per_class, seed=args.seed,
         )
         augmentation_summary["dry_run_estimate"] = True
         augmentation_summary["note"] = "문서 전체 파싱 전 추정치; 실제 학습에서 다시 계산"
@@ -735,7 +744,8 @@ def train(args: argparse.Namespace, records: list[dict[str, Any]], output_dir: P
             output_dir / "train_undersampling_summary.json",
         )
     train_records, augmentation_summary = append_train_augmentations(
-        args.label_file, train_records, valid_records, test_records, build_business_group_key
+        args.label_file, train_records, valid_records, test_records, build_business_group_key,
+        per_class=args.augmentation_per_class, seed=args.seed,
     )
     if augmentation_summary:
         LOGGER.info("증강 CSV 반영: %s", augmentation_summary)
@@ -826,8 +836,31 @@ def train(args: argparse.Namespace, records: list[dict[str, Any]], output_dir: P
     best_path = output_dir / "best_model.pt"
     epochs_without_improvement = 0
     train_log: list[dict[str, Any]] = []
+    step_log: list[dict[str, Any]] = []
+    global_step = 0
+
+    def save_if_improved(metrics, epoch_number, step_number):
+        nonlocal best_score
+        if metrics["macro_f1"] <= best_score + 1e-8:
+            return
+        best_score = metrics["macro_f1"]
+        checkpoint = {
+            "model_state_dict": model.state_dict(),
+            "model_name": args.model_name,
+            "num_labels": args.num_labels,
+            "epoch": epoch_number,
+            "global_step": step_number,
+            "metrics": metrics,
+            "args": vars(args),
+        }
+        temporary_path = output_dir / "best_model.pt.tmp"
+        torch.save(checkpoint, temporary_path)
+        temporary_path.replace(best_path)
+        LOGGER.info("best model 저장: epoch=%d step=%d macro_f1=%.6f",
+                    epoch_number, step_number, best_score)
 
     for epoch in range(1, args.epochs + 1):
+        score_before_epoch = best_score
         model.train()
         epoch_losses: list[float] = []
         for step, batch in enumerate(train_loader, start=1):
@@ -870,6 +903,18 @@ def train(args: argparse.Namespace, records: list[dict[str, Any]], output_dir: P
                     len(train_loader),
                     float(np.mean(epoch_losses[-20:])),
                 )
+            global_step += 1
+            if args.eval_steps and global_step % args.eval_steps == 0 and step < len(train_loader):
+                intermediate_metrics, _, _ = evaluate_model(
+                    model, valid_loader, device, criterion=criterion,
+                    mixed_precision=amp_enabled, collect_details=False,
+                )
+                save_if_improved(intermediate_metrics, epoch, global_step)
+                step_log.append({"epoch": epoch, "global_step": global_step,
+                                 **intermediate_metrics})
+                write_csv(step_log, output_dir / "validation_step_log.csv")
+                LOGGER.info("중간 검증 step=%d metrics=%s", global_step, intermediate_metrics)
+                model.train()
 
         valid_metrics, _, _ = evaluate_model(
             model,
@@ -892,22 +937,9 @@ def train(args: argparse.Namespace, records: list[dict[str, Any]], output_dir: P
         write_csv(train_log, output_dir / "train_log.csv")
         LOGGER.info("epoch %d metrics=%s", epoch, row)
 
-        score = valid_metrics["macro_f1"]
-        if score > best_score + 1e-8:
-            best_score = score
+        save_if_improved(valid_metrics, epoch, global_step)
+        if best_score > score_before_epoch + 1e-8:
             epochs_without_improvement = 0
-            checkpoint = {
-                "model_state_dict": model.state_dict(),
-                "model_name": args.model_name,
-                "num_labels": args.num_labels,
-                "epoch": epoch,
-                "metrics": valid_metrics,
-                "args": vars(args),
-            }
-            temporary_path = output_dir / "best_model.pt.tmp"
-            torch.save(checkpoint, temporary_path)
-            temporary_path.replace(best_path)
-            LOGGER.info("best model 저장: %s", best_path)
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= args.early_stopping_patience:

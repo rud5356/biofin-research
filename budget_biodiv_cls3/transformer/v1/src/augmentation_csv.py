@@ -1,6 +1,7 @@
 """Optional merged-CSV support; legacy CSV behavior is unchanged."""
-from collections import Counter
+from collections import Counter, defaultdict
 import csv
+import random
 from pathlib import Path
 
 import pandas as pd
@@ -33,7 +34,9 @@ def read_original_frame(path):
     return pd.DataFrame(originals)
 
 
-def append_train_augmentations(path, train, valid, test, group_key):
+def append_train_augmentations(path, train, valid, test, group_key, *, per_class=None, seed=42):
+    if per_class is not None and per_class < 0:
+        raise ValueError('augmentation_per_class must be >= 0')
     stats = Counter()
     if not is_merged(path):
         return train, dict(stats)
@@ -41,6 +44,9 @@ def append_train_augmentations(path, train, valid, test, group_key):
     heldout = {group_key(r) for r in valid + test}
     if train_groups & heldout:
         raise ValueError('Original train/heldout business group overlap')
+    if per_class == 0:
+        return list(train), {'mode': 'original_only', 'added_to_train': 0,
+                             'added_by_category': {}, 'per_class_limit': 0}
     # Source-specific label checks prevent unrelated or edited rows entering train.
     parents = {}
     parents_by_row = {}
@@ -106,8 +112,38 @@ def append_train_augmentations(path, train, valid, test, group_key):
             result.append(record)
             stats['added_to_train'] += 1
             accepted_by_label[label] += 1
+    if per_class is not None:
+        candidates = result[len(train):]
+        result = list(train)
+        by_label = defaultdict(lambda: defaultdict(list))
+        for record in candidates:
+            by_label[int(record['label'])][group_key(record)].append(record)
+        for label, parents_for_label in sorted(by_label.items()):
+            rng = random.Random(seed + label)
+            parent_keys = sorted(parents_for_label)
+            rng.shuffle(parent_keys)
+            for records in parents_for_label.values():
+                rng.shuffle(records)
+            count = 0
+            while parent_keys and count < per_class:
+                remaining = []
+                for parent_key in parent_keys:
+                    records = parents_for_label[parent_key]
+                    result.append(records.pop())
+                    count += 1
+                    if records:
+                        remaining.append(parent_key)
+                    if count == per_class:
+                        break
+                parent_keys = remaining
+        stats['eligible_before_limit'] = len(candidates)
+        stats['excluded_by_limit'] = len(candidates) - (len(result) - len(train))
+        stats['added_to_train'] = len(result) - len(train)
+        accepted_by_label = Counter(str(r['label']) for r in result[len(train):])
     return result, {
         **dict(stats),
+        'per_class_limit': per_class,
+        'sampling_seed': seed,
         'available_by_category': dict(sorted(available_by_label.items())),
         'excluded_no_train_parent_by_category': dict(sorted(excluded_by_label.items())),
         'added_by_category': dict(sorted(accepted_by_label.items())),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ def evaluate_model(
     criterion: torch.nn.Module | None = None,
     mixed_precision: bool = False,
     collect_details: bool = False,
-) -> tuple[dict[str, float], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     model.eval()
     losses: list[float] = []
     true_labels: list[int] = []
@@ -96,6 +97,7 @@ def evaluate_model(
     if not true_labels:
         raise ValueError("평가할 validation sample이 없습니다")
     metrics = {
+        "prediction_counts": dict(sorted(Counter(predicted_labels).items())),
         "loss": float(np.mean(losses)) if losses else float("nan"),
         "accuracy": float(accuracy_score(true_labels, predicted_labels)),
         "macro_f1": float(f1_score(true_labels, predicted_labels, average="macro", zero_division=0)),
