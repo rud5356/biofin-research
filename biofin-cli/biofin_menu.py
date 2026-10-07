@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """BIOFIN Docker command wizard (Linux, Python 3.8+; no dependencies)."""
 import argparse
+import csv
 import datetime
 import os
 from pathlib import Path
@@ -129,12 +130,28 @@ def main():
         parser.error(f"프로젝트 폴더가 없습니다: {root}")
     print(f"BIOFIN 실행 도우미\n프로젝트: {root}\n파일과 폴더는 목록에서 번호로 선택하세요.")
     training = choose("작업 선택", ["모델 학습", "모델 예측"]) == 1
-    transformer = choose("모델 선택", ["Transformer", "LLM (Ollama)"]) == 1
+    backend = choose("모델 선택", ["Transformer", "LLM (Ollama)", "LLM (vLLM API)"])
+    transformer = backend == 1
+    vllm = backend == 3
     if not transformer:
-        print("안내: 제공된 LLM 학습/예측은 모두 Ollama 분류 스크립트를 실행합니다.")
+        print("안내: LLM은 실행 중인 서버 API로 분류합니다. 모델 학습이나 서버 기동은 하지 않습니다.")
+    augmentation = None
+    if transformer and training:
+        augmentation = choose("학습 데이터 선택", ["원본만 사용", "원본 + 증강 통합 CSV 사용"])
     data = "260812_2023data.csv" if training else "울산_환경부_2024/울산_환경부_2024.csv"
     docs = "2023/사업설명자료" if training else "울산_환경부_2024/사업설명자료"
-    input_file = project_path("입력 CSV", f"document/{data}", root, "file")
+    while True:
+        input_file = project_path("원본 + 증강 통합 CSV" if augmentation == 2 else "입력 CSV", f"document/{data}", root, "file")
+        if augmentation != 2:
+            break
+        try:
+            with (root / input_file).open(encoding="utf-8-sig", newline="") as stream:
+                columns = set(next(csv.reader(stream), []))
+            if {"row_type", "training_eligible"}.issubset(columns):
+                break
+        except UnicodeDecodeError:
+            pass
+        print("증강 학습에는 row_type, training_eligible 컬럼이 있는 UTF-8 통합 CSV를 선택해주세요.")
     doc_dir = project_path("사업설명자료 폴더", f"document/{docs}", root, "dir")
     family = "transformer" if transformer else "llm"
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -146,6 +163,12 @@ def main():
         cmd = ["docker", "exec", "-it", "-w", workdir, container, "python", "-u", script]
         if training:
             cmd += ["--label_file", input_file, "--doc_dir", doc_dir]
+            if augmentation == 1:
+                cmd += ["--augmentation_per_class", "0"]
+            elif choose("증강 데이터 사용량", ["사용 가능한 증강 전체", "클래스별 최대 개수 지정"]) == 2:
+                cmd += ["--augmentation_per_class", integer("클래스별 증강 최대 개수", 100)]
+            if augmentation == 2:
+                print("증강문은 학습용 원본 사업에 연결된 것만 사용하며 검증/시험 사업의 증강문은 제외됩니다.")
             if choose("다수 클래스 언더샘플링", ["사용", "사용하지 않음"]) == 1:
                 cmd += ["--undersample_majority", "--majority_label", ask("다수 클래스 라벨", "0"),
                         "--majority_cap_multiplier", integer("다수 클래스 배수", 1),
@@ -159,18 +182,31 @@ def main():
         cmd += ["--output_dir", output]
         print("안내: 호스트 프로젝트와 컨테이너 내부 프로젝트의 파일 구성이 같아야 합니다.")
     else:
-        script = "llm/v1/classify_biofin_category_with_ollama.py"
+        script = f"llm/v1/classify_biofin_category_with_{'vllm' if vllm else 'ollama'}.py"
         if not hasattr(os, "getuid"):
             raise RuntimeError("LLM Docker 실행은 Linux에서 사용해주세요.")
         cmd = ["docker", "run", "--rm", "-it", "--network", "host", "--user", f"{os.getuid()}:{os.getgid()}",
-               "-e", "PYTHONPATH=/workspace/llm/.packages", "-v", f"{root}:/workspace", "-w", "/workspace",
+               "-e", "PYTHONPATH=/workspace/llm/.packages"]
+        if vllm:
+            cmd += ["-e", "VLLM_API_KEY"]
+        cmd += ["-v", f"{root}:/workspace", "-w", "/workspace",
                "python:3.11-slim", "python", "-u", script,
                "--input-file", f"/workspace/{input_file}", "--doc-dir", f"/workspace/{doc_dir}",
-               "--output-dir", f"/workspace/{output}",
-               "--ollama-url", ask("Ollama URL", "http://172.22.0.1:20001"),
-               "--model", ask("Ollama 모델", "gemma3:12b"),
-               "--max-document-chars", integer("문서 최대 문자 수", 6000),
-               "--num-ctx", integer("컨텍스트 크기", 8192), "--timeout", integer("타임아웃(초)", 300)]
+               "--output-dir", f"/workspace/{output}"]
+        if vllm:
+            cmd += ["--vllm-url", ask("vLLM API URL", "https://app-17a9ea75.proxy1.ainexus.ktcloud.com"),
+                    "--model", ask("vLLM 모델 ID (/v1/models의 id)", "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ")]
+            print("최대 컨텍스트와 GPU 점유는 서버 설정입니다. 여기서는 응답 길이와 동시 요청 수를 정합니다.")
+        else:
+            cmd += ["--ollama-url", ask("Ollama URL", "http://172.22.0.1:20001"),
+                    "--model", ask("Ollama 모델", "gemma3:12b")]
+        cmd += ["--max-document-chars", integer("사업목적 최대 문자 수", 6000)]
+        if vllm:
+            cmd += ["--max-tokens", integer("응답 최대 토큰 수", 2048),
+                    "--workers", integer("동시 API 요청 수", 1)]
+        else:
+            cmd += ["--num-ctx", integer("컨텍스트 크기", 8192)]
+        cmd += ["--timeout", integer("타임아웃(초)", 300)]
         retries = ask("재시도 횟수 (default: 스크립트 기본값)", "3" if training else "default")
         while retries != "default" and not retries.isdigit():
             retries = ask("0 이상 정수 또는 default", "default")
