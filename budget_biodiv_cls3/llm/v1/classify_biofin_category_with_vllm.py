@@ -41,7 +41,7 @@ DEFAULT_VLLM_URL = "https://app-17a9ea75.proxy1.ainexus.ktcloud.com"
 DEFAULT_INPUT_FILE = Path("document/2023biofin_label_matched.csv")
 DEFAULT_LABEL_COLUMN = "LLM BIOFIN 1차 카테고리"
 DEFAULT_GOLD_LABEL_COLUMN = "BIOFIN 1차 카테고리"
-PROMPT_VERSION = "kr-biofin-category-2026-10-07-v8-request2-9-vllm-v1"
+PROMPT_VERSION = "kr-biofin-category-2026-10-08-v9-numeric-review-vllm-v1"
 VALID_LABELS = set(range(10))
 ENCODINGS = ("utf-8-sig", "cp949", "utf-8")
 
@@ -62,7 +62,7 @@ SYSTEM_PROMPT = """\
 
 먼저 해당 사업이 BIOFIN 생물다양성 관련 지출인지 판정한다.
 명시적 포함 규칙과 특례를 먼저 확인한 뒤, 무관하거나 적용 가능한 제외조건에 해당함이 확인되면 0으로 분류한다.
-자료가 없거나 근거가 모호하면 0 대신 label=null, classification_status='검토 필요'로 반환한다. 정보가 없다는 사실은 비해당의 증거가 아니다.
+사업설명자료가 없거나 근거가 제한적이어도 제공된 사업명·상위사업·회계(기금)·기관 기능과 명시적 포함·제외 규칙을 먼저 검토하여 BIOFIN 관련성을 판단하고, 가장 근거가 있는 label 0~9 정수와 classification_status(0=무관, 1~9=관련)를 반드시 반환한다. 불확실성은 별도의 review_needed=true와 review_reason에 기록하며 label=null로 판단을 유보하지 않는다.
 
 관련성이 확인된 경우에만 1~9 중 정확히 하나를 선택한다.
 
@@ -71,7 +71,7 @@ SYSTEM_PROMPT = """\
 
 # 출력값
 
-null = 검토 필요(분류 미확정)
+검토 필요는 카테고리가 아닌 별도 확인 표시(review_needed)다.
 0 = 비해당
 1 = 유전자원 접근 및 이익 공유(ABS)
 2 = 인식 제고 및 연구
@@ -99,7 +99,7 @@ null = 검토 필요(분류 미확정)
 2. 명시적 포함 활동에는 일반 산업지원·인프라·보건 같은 포괄적 제외를 덮어씌우지 않는다.
 3. 관련성이 인정된 R&D 및 지정 연구기관 특례를 적용한다.
 4. 그 밖의 사업은 핵심 기능과 주목적으로 분류하되, 7·8·4의 포함 조건이 겹치면 7 > 8 > 4를 적용한다.
-5. 포함 근거가 없을 때만 일반 제외조건을 검토한다. 증거 부족이면 '근거 부족: 검토 필요'로 설명한다.
+5. 포함 근거가 없을 때만 일반 제외조건을 검토한다. 증거가 제한적이면 숫자 분류를 수행하고 review_needed=true 및 review_reason에 부족한 정보를 기록한다.
 
 예외가 있는지 확인하기 전에 0으로 조기 종료하지 않는다.
 기존 레이블이나 특정 카테고리의 예상 비율에 맞추지 말고 입력과 아래 규칙만 사용한다.
@@ -112,7 +112,7 @@ null = 검토 필요(분류 미확정)
 
 YES → STEP 2로 이동한다.
 NO → STEP 0의 명시적 포함 규칙과 특례에도 해당하지 않는지 확인한 뒤 0으로 분류한다.
-UNKNOWN → 사업명·회계(기금)명·기관 목록과 명시적 포함 규칙을 확인해도 판정할 수 없으면 검토 필요(label=null)로 분류한다.
+UNKNOWN → 사업명·회계(기금)명·기관 목록과 명시적 포함 규칙을 먼저 확인하여 근거가 있는 숫자를 선택한다. 끝까지 1~9의 포함 근거가 확인되지 않으면 운영상 잠정 0을 부여하고 review_needed=true로 표시한다. 이는 실제 무관함을 확정한 것과 구별한다.
 
 단순히 다음 단어가 있다는 이유만으로 YES로 판단하지 않는다.
 
@@ -147,7 +147,7 @@ UNKNOWN → 사업명·회계(기금)명·기관 목록과 명시적 포함 규�
 - 위와 같은 비관련 활동은 R&D 사업이어도 관련성이 없으므로 2가 아니라 0이다.
 
 위 예시의 사업명만으로 무조건 제외하지도 않는다. 별도의 오염 저감·자연자원 관리·ABS 등 지침상 명시적 포함 활동이 실제 입력에 확인되면 그 활동을 독립적으로 검토한다.
-대상과 수행 활동이 부족하여 자연 생태계인지 산업적 비유인지 확인되지 않으면 '근거 부족: 검토 필요'로 구별한다.
+대상과 수행 활동이 부족하여 자연 생태계인지 산업적 비유인지 확인되지 않으면 숫자 분류와 별도로 review_needed=true, review_reason에 확인되지 않은 의미를 기록한다.
 비유적 생태계 표현 때문에 0으로 판단할 때 reason에는 실제 대상(의료데이터·건강서비스·양자기술 등)과 일반 보건·산업·정보화 활동이라는 제외 근거를 쓴다.
 
 
@@ -170,9 +170,9 @@ UNKNOWN → 사업명·회계(기금)명·기관 목록과 명시적 포함 규�
 * 생물다양성 공존조치가 없는 수소·암모니아·연료전지·풍력 등 에너지 산업 인프라
 * 사용후핵연료 관리·원전해체 등 핵연료주기 기술개발
 * 일반 청사 신축·재건축(지정 수목원·생물다양성 연구기관의 조성·건립 특례는 2)
-* 생물다양성과 무관한 기관의 일반 경비(관련 기관·부서·기금은 핵심 기능에 따라 포함; 소속 기능을 확인할 수 없으면 검토 필요)
+* 생물다양성과 무관한 기관의 일반 경비(관련 기관·부서·기금은 핵심 기능에 따라 포함; 소속 기능이 불명확하면 나머지 입력으로 숫자 분류 후 별도 검토 표시)
 * 지속가능 요소가 확인되지 않는 일반 양식·농업·수산업 육성
-자료 부족으로 인정 활동을 확인할 수 없는 사업은 위 제외 목록에 넣지 않고 검토 필요로 구분한다.
+자료 부족 자체를 명시적 제외로 해석하지 않는다. 나머지 입력의 포함 규칙을 먼저 검토하고, 끝까지 포함 근거가 없으면 잠정 0과 별도 검토 표시를 반환한다.
 
 인정 활동 없이 키워드만 겹치는 경우에는 위 제외조건을 적용한다.
 입력에 확인된 구체적 포함 활동이 있으면 일반 제외조건을 우선하지 않는다.
@@ -215,7 +215,7 @@ R&D라는 이유만으로 관련성을 인정하지 않는다.
 
 기본경비·인건비·전산운영경비 등 경상경비는 기관·부서·기금의 핵심 기능으로 판단한다.
 
-명시된 기관 규칙을 우선한다. 무관한 기능이 확인되면 0, 기관·기금의 기능을 확인할 자료가 부족하면 검토 필요다.
+명시된 기관 규칙을 우선한다. 무관한 기능이 확인되면 0이다. 기관·기금의 기능이 불명확하면 사업명·상위사업·회계명 등의 확인 가능한 기능으로 분류하고, 포함 근거가 없으면 잠정 0과 별도 검토 표시를 반환한다.
 설명자료가 없으면 사업명·회계명·계정명·상위사업명으로 기관 목록과 포함 항목을 먼저 확인한다.
 국립자연휴양림관리소의 운영·경상경비 및 해당 기능을 지원하는 손익계정·자본계정 전출은 9로 판단한다. 전출이라는 형식만으로 제외하거나 다른 기관의 전출에 확대하지 않는다.
 
@@ -379,7 +379,7 @@ R&D·지정 연구기관 특례 적용 후, 실제 포함 조건이 겹치는 �
 유통·가공·판매·수출 지원 자체는 제외한다. 지침상 별도 포함 활동이 있으면 그 활동을 확인한다.
 생물다양성 관련성이 인정된 업종 외 금융·조건 없는 일반 업종 금융, 보전 제도·기금·구역 체계의 행정·재정 지출은 5다.
 개발제한구역관리, 수계관리기금의 주민지원사업 평가·DB 지원은 5다.
-일반 행정지원은 생물다양성 관련 기관·기금의 것만 포함한다. 무관한 기관은 0, 소속·기능 확인 불가는 검토 필요다.
+일반 행정지원은 생물다양성 관련 기관·기금의 것만 포함한다. 무관한 기관은 0이다. 소속·기능 확인이 어려워도 나머지 입력을 검토해 숫자를 부여하고 별도 검토 표시를 남긴다.
 경상경비는 기관 핵심 기능 규칙을 따른다. DB·융자·전출이라는 형식만으로 0 또는 5로 일괄 분류하지 않는다.
 
 ## 8 vs 9
@@ -398,26 +398,26 @@ R&D·지정 연구기관 특례 적용 후, 실제 포함 조건이 겹치는 �
 수산자원 조성·서식지 회복 → 8
 TAC·감척·자율관리어업 → 9
 
-# 0과 검토 필요의 구분
+# 숫자 분류와 검토 표시의 분리
 
-0은 지침상 제외 또는 생물다양성과 무관한 실제 활동이 확인된 경우에만 선택한다.
+0은 지침상 제외 또는 무관한 활동이 확인된 경우에 선택한다. 모든 입력과 포함 규칙을 검토한 후에도 관련 근거가 없으면 잠정 0을 선택하고, 실제 제외와 구분해 설명한다.
 설명자료 없음·추출 실패·모호한 근거는 무관의 증거가 아니다.
 본문이 없으면 사업명·회계(기금)명·계정명·기관 목록에서 명시적 포함 조건을 먼저 찾는다.
 메타데이터로 포함 또는 제외를 판정할 수 있으면 해당 결과를 선택한다.
-그래도 판정 근거가 부족하면 label=null, classification_status='검토 필요'로 반환한다.
-reason은 '근거 부족: 검토 필요'로 시작하고 확인되지 않은 대상·활동·조건을 설명한다.
-정보 부족 상태에서 0 또는 1~9를 추정하지 않는다.
+분류를 유보하지 말고 가장 근거가 있는 0~9 숫자를 반환한다. 포함 근거가 끝까지 없으면 잠정 0을 부여하고 review_needed=true를 기록한다.
+잠정 0의 reason은 '잠정 분류: 포함 근거 미확인'으로 시작한다. review_reason에는 확인되지 않은 대상·활동·조건을 150자 이내로 기록한다.
+입력에 없는 목적·활동을 만들어 1~9를 부여하지 않는다. 분류 결과와 근거의 불확실성을 별도 필드로 구분한다.
 
 # 혼합사업
 
 한 사업에 여러 활동이 있으면 다음 순서로 판단한다.
 
 1. 생물다양성 관련 하위 요소를 찾는다.
-2. 관련 근거가 명시된 내역사업을 찾아 reason에 그 요소를 특정한다. 자료 부족이면 검토 필요, 실제 무관 활동만 확인되면 0이다.
+2. 관련 근거가 명시된 내역사업을 찾아 reason에 그 요소를 특정한다. 자료가 부족해도 다른 입력의 기능을 검토해 숫자를 선택하고 별도 검토 표시를 남긴다. 실제 무관 활동만 확인되면 0이다.
 3. 여러 요소는 주목적, 생물다양성 근거가 명시된 요소, 확인 가능한 예산 비중 순으로 판단한다.
 4. 7·8·4의 포함 조건이 겹치면 일반 주목적·예산 비중 규칙보다 7 > 8 > 4를 우선한다.
 5. 입력에 없는 예산 비중이나 사업 중요도를 추정하지 않는다.
-6. 판정 가능한 경우 하나의 카테고리만 선택하고, 근거 부족이면 검토 필요로 남긴다.
+6. 항상 하나의 숫자 카테고리를 선택하고, 근거 부족 여부는 별도 review_needed와 review_reason에 기록한다.
 
 목표와 수단을 구별한다. 수변녹지 조성의 명시적 최종 목표가 비점오염 저감·수질개선이면 6,
 훼손된 생태계·서식지의 회복이 명시되면 7 해당 여부를 먼저 확인한 뒤 8로 판단한다. '조성'이라는 표현만으로 훼손 상태를 추정하지 않는다.
@@ -454,7 +454,7 @@ reason은 '근거 부족: 검토 필요'로 시작하고 확인되지 않은 대
 7. 입력자료에 없는 내용을 추정하지 않았는가?
 8. 일반 제외조건으로 하수처리·가축 방역·TAC 등 명시적 포함 규칙을 뒤집지는 않았는가?
 9. 운영비·융자·시설 설치라는 형식 대신 기관 기능·지원 조건·시설 용도를 확인했는가?
-10. 자료 부족을 0으로 처리하지 않고 검토 필요로 구분했는가?
+10. 나머지 입력과 포함 규칙을 충분히 검토해 숫자를 부여했으며, 자료 부족에 따른 잠정 판단은 별도 검토 표시로 구분했는가?
 11. 7 > 8 > 4와 대기 분야의 생물다양성 목적 요건을 적용했는가?
 
 위 검증 후 최종 카테고리를 결정한다.
@@ -468,11 +468,13 @@ reason은 '근거 부족: 검토 필요'로 시작하고 확인되지 않은 대
 "classification_status": "무관",
 "reason": "판정 근거",
 "evidence": ["입력에 실제 존재하는 표현"],
-"confidence": 0.00
+"confidence": 0.00,
+"review_needed": false,
+"review_reason": ""
 }
 
-label은 확정 판정일 때 0~9 정수, 검토 필요일 때 JSON null을 사용한다.
-classification_status는 1~9이면 '관련', 0이면 '무관', null이면 '검토 필요'다.
+label은 반드시 0~9 정수다. null 또는 빈값은 허용하지 않는다.
+classification_status는 1~9이면 '관련', 0이면 '무관'만 사용한다. review_needed는 boolean이며 추가 확인이 필요하면 true, 아니면 false다. review_reason은 검토 사유이며 불필요하면 빈 문자열이다.
 
 reason에는 다음을 포함한다.
 
@@ -480,8 +482,8 @@ reason에는 다음을 포함한다.
 * 적용한 포함 또는 제외 기준
 * 가장 혼동될 수 있는 경쟁 카테고리와 그것을 배제한 이유
 
-0인 경우 reason은 '명시적 제외'로 시작하고 실제 무관 활동 또는 적용 제외조건을 설명한다.
-검토 필요인 경우 reason은 반드시 '근거 부족: 검토 필요'로 시작한다.
+실제 제외 근거가 있는 0의 reason은 '명시적 제외'로 시작한다. 포함 근거 미확인으로 잠정 0을 선택했으면 '잠정 분류: 포함 근거 미확인'으로 시작하고 review_needed=true를 반환한다.
+검토 여부는 숫자 레이블을 대체하지 않는다. 판단 과정을 반복해 쓰지 말고 최종 결론과 필요한 근거만 기록한다.
 reason은 핵심 활동, 적용 규칙, 경쟁 분류 배제 이유 순으로 300자 이내로 간결하게 작성한다.
 "지침에서 제외한다"고 쓸 때는 위 프롬프트에 실제로 있는 제외조건만 인용한다.
 
@@ -495,11 +497,11 @@ BAR는 분류기준 또는 출력대상이 아니므로 카테고리 판정에 �
 """
 
 # 시스템 프롬프트와 별도로 유지하는 입출력 형식입니다.
-# SYSTEM_PROMPT와 별개로 카테고리 또는 검토 필요의 JSON 형식을 지정합니다.
+# 카테고리와 별도 검토 표시의 JSON 형식을 지정합니다.
 PROMPT_TEMPLATE = """\
 {classification_prompt}
 
-다음 예산 사업을 BIOFIN 1차 카테고리 0~9 또는 검토 필요(null)로 분류하라.
+다음 예산 사업을 BIOFIN 1차 카테고리 0~9 중 하나로 분류하고 검토 필요 여부를 별도로 표시하라.
 
 소관명: {소관명}
 회계명: {회계명}
@@ -519,10 +521,12 @@ PROMPT_TEMPLATE = """\
   "classification_status": "무관",
   "confidence": 0.0,
   "reason": "",
-  "evidence": []
+  "evidence": [],
+  "review_needed": false,
+  "review_reason": ""
 }}
 
-label은 0~9 정수 또는 null이다. classification_status는 '관련'(1~9), '무관'(0), '검토 필요'(null) 중 하나이며 confidence는 0.0부터 1.0까지다.
+label은 반드시 0~9 정수다. classification_status는 '관련'(1~9) 또는 '무관'(0)이다. review_needed는 true/false, review_reason은 별도 검토 사유다. confidence는 0.0부터 1.0까지다.
 """
 
 CACHE_FIELDS = (
@@ -540,6 +544,7 @@ CACHE_FIELDS = (
     "document_chars",
     "raw_response",
     "updated_at",
+    "review_needed", "review_reason", "검토필요",
 )
 EXCLUDED_CSV_COLUMNS = frozenset({
     "사업설명자료_파일명",
@@ -556,6 +561,7 @@ EXTRA_OUTPUT_COLUMNS = (
     "classification_status",
     "confidence", "reason", "evidence",
     "document_status", "document_path", "document_chars",
+    "review_needed", "review_reason", "검토필요",
 )
 
 
@@ -837,18 +843,21 @@ def parse_jsonish_response(text: str) -> dict[str, Any]:
         raise ValueError("LLM 응답이 JSON 객체가 아닙니다.")
     value = data.get("label")
     status = clean_cell(data.get("classification_status"))
-    if status == "검토 필요":
-        if "label" not in data or value is not None:
-            raise ValueError("검토 필요 응답의 label은 null이어야 합니다.")
-        label = ""  # CSV에서는 미확정 카테고리를 빈칸으로 저장한다.
-    else:
-        label = None if isinstance(value, bool) else parse_valid_label(value)
-        if label is None:
-            raise ValueError(f"label은 0~9 정수 또는 검토 필요의 null이어야 합니다: {value!r}")
-        expected_status = "무관" if label == 0 else "관련"
-        if status and status != expected_status:
-            raise ValueError("classification_status와 label이 일치하지 않습니다.")
-        status = expected_status
+    if type(value) is not int or value not in VALID_LABELS:
+        raise ValueError(f"label은 0~9 정수여야 합니다: {value!r}")
+    label = value
+    expected_status = "무관" if label == 0 else "관련"
+    if status and status != expected_status:
+        raise ValueError("classification_status와 label이 일치하지 않습니다.")
+    status = expected_status
+    review_needed = data.get("review_needed", False)
+    if not isinstance(review_needed, bool):
+        raise ValueError("review_needed는 JSON boolean이어야 합니다.")
+    review_reason = clean_cell(data.get("review_reason"))[:500]
+    if review_needed and not review_reason:
+        raise ValueError("검토가 필요한 응답은 review_reason을 제공해야 합니다.")
+    if not review_needed and review_reason:
+        raise ValueError("검토가 불필요한 응답의 review_reason은 빈 문자열이어야 합니다.")
 
     try:
         confidence = float(data.get("confidence", 0.0))
@@ -861,6 +870,9 @@ def parse_jsonish_response(text: str) -> dict[str, Any]:
         "confidence": max(0.0, min(1.0, confidence)),
         "reason": clean_cell(data.get("reason"))[:500],
         "evidence": clean_cell(data.get("evidence"))[:500],
+        "review_needed": review_needed,
+        "review_reason": review_reason,
+        "검토필요": "검토 필요" if review_needed else "",
         "raw_response": text,
     }
 
@@ -967,6 +979,9 @@ def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
     return {
         "label": "",
         "classification_status": "실패",
+        "review_needed": True,
+        "review_reason": f"분류 실패: {last_error}",
+        "검토필요": "검토 필요",
         "confidence": 0.0,
         "reason": f"분류 실패: {last_error}",
         "evidence": "",
@@ -1051,8 +1066,6 @@ def valid_cached_label(record: dict[str, Any] | None) -> bool:
     if record.get("prompt_version") != PROMPT_VERSION:
         return False
     status = record.get("classification_status")
-    if status == "검토 필요":
-        return clean_cell(record.get("label")) == ""
     label = parse_valid_label(record.get("label"))
     return label is not None and status == ("무관" if label == 0 else "관련")
 
@@ -1238,6 +1251,9 @@ def classify_items(
             "key_hash": key_hash,
             "label": result["label"],
             "classification_status": result["classification_status"],
+            "review_needed": result["review_needed"],
+            "review_reason": result["review_reason"],
+            "검토필요": result["검토필요"],
             "confidence": f"{float(result['confidence']):.3f}",
             "reason": result["reason"],
             "evidence": result["evidence"],
@@ -1292,6 +1308,10 @@ def write_outputs(
         column for column in headers if column not in excluded
     ] + [args.label_col, *EXTRA_OUTPUT_COLUMNS]
 
+    output_headers = [c for c in output_headers if c not in EXCLUDED_CSV_COLUMNS]
+    output_headers.remove("classification_status")
+    output_headers.insert(min(22, len(output_headers) - 1), "classification_status")
+
     output_rows: list[dict[str, Any]] = []
     for row in rows:
         result = dict(row)
@@ -1317,6 +1337,9 @@ def write_outputs(
             "row_count": item["row_count"],
             "label": cached.get("label", ""),
             "classification_status": cached.get("classification_status", ""),
+            "review_needed": cached.get("review_needed", ""),
+            "review_reason": cached.get("review_reason", ""),
+            "검토필요": cached.get("검토필요", ""),
             "confidence": cached.get("confidence", ""),
             "reason": cached.get("reason", ""),
             "evidence": cached.get("evidence", ""),
@@ -1332,7 +1355,7 @@ def write_outputs(
         except (TypeError, ValueError):
             confidence = 0.0
         if (not valid_cached_label(cached)
-                or cached.get("classification_status") == "검토 필요"
+                or clean_cell(cached.get("review_needed")).lower() == "true"
                 or confidence < args.review_threshold):
             review_rows.append(audit)
 
@@ -1340,6 +1363,7 @@ def write_outputs(
         "key_hash", "row_count", "label", "classification_status", "confidence",
         "reason", "evidence", "input_text", "document_status",
         "document_path", "document_chars", "raw_response",
+        "review_needed", "review_reason", "검토필요",
     ]
     write_csv(args.audit_csv, audit_headers, audit_rows)
     write_csv(args.review_csv, audit_headers, review_rows)
