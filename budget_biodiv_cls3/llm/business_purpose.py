@@ -33,3 +33,29 @@ def extract_business_purpose(text: str) -> str:
             content.append(following)
         # 종료 경계가 없으면 나머지 문서를 목적이라고 간주하지 않는다.
     return ''
+
+
+LEGAL_START = re.compile(
+    r'^' + PREFIX + r'(?:법\s*적\s*근\s*거|'
+    r'(?:사\s*업\s*)?(?:추\s*진\s*|지\s*원\s*)?근\s*거)'
+    r'(?:\s*(?:및|[·ㆍ‧])\s*추\s*진\s*경\s*위)?'
+    r'(?:\s*[:：]\s*(.*)|\s*)$'
+)
+
+
+def extract_legal_basis(text: str) -> str:
+    """다음 항목 경계까지 확인된 법적·사업·추진·지원 근거만 반환한다."""
+    lines = unicodedata.normalize('NFKC', text).splitlines()
+    for start, line in enumerate(lines):
+        match = LEGAL_START.fullmatch(line.strip())
+        if not match:
+            continue
+        content = [match.group(1)] if match.group(1) else []
+        for following in lines[start + 1:]:
+            if END.fullmatch(following.strip()) or START.fullmatch(following.strip()):
+                result = '\n'.join(content).strip()
+                if result:
+                    return result
+                break
+            content.append(following)
+    return ''
