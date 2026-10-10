@@ -82,5 +82,5 @@ python crawl_business_docs.py --year 2024 --limit 0 --overwrite
 
 ## 기존 label CSV 방식
 
-`--year`를 생략하면 기존처럼 `before/budget_biodiv_cls2/outputs`의 label=1 입력 CSV를
+`--year`를 생략하면 기존처럼 `budget_biodiv_cls2/outputs`의 label=1 입력 CSV를
 읽어 해당 사업만 매칭하는 호환 모드로 실행됩니다.

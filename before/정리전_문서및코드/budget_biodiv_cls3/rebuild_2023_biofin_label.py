@@ -12,7 +12,6 @@ import pandas as pd
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_FULL_SOURCE = (
     PROJECT_DIR.parent
-    / "before"
     / "budget_biodiv_cls2"
     / "outputs"
     / "사업설명자료"

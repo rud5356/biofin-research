@@ -1,0 +1,114 @@
+[
+  {
+    "source": "budget_biodiv_cls",
+    "destination": "before/budget_biodiv_cls"
+  },
+  {
+    "source": "budget_biodiv_cls2",
+    "destination": "before/budget_biodiv_cls2"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20260917_235133",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20260917_235133"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20260918_013027",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20260918_013027"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20260921_11111",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20260921_11111"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20260921_235133",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20260921_235133"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20260922_",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20260922_"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20260928_015931",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20260928_015931"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20260929_2024",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20260929_2024"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20260929_Gangwon",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20260929_Gangwon"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20260929_ULSAN",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20260929_ULSAN"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20260930_2024_vs_2023",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20260930_2024_vs_2023"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/이전결과",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/이전결과"
+  },
+  {
+    "source": "budget_biodiv_cls3/outputs/2023_dry_run",
+    "destination": "before/budget_biodiv_cls3/outputs/2023_dry_run"
+  },
+  {
+    "source": "budget_biodiv_cls3/outputs/2023_dry_run_fixed",
+    "destination": "before/budget_biodiv_cls3/outputs/2023_dry_run_fixed"
+  },
+  {
+    "source": "budget_biodiv_cls3/outputs/dry_run_check",
+    "destination": "before/budget_biodiv_cls3/outputs/dry_run_check"
+  },
+  {
+    "source": "budget_biodiv_cls3/outputs/dry_run_fixed",
+    "destination": "before/budget_biodiv_cls3/outputs/dry_run_fixed"
+  },
+  {
+    "source": "budget_biodiv_cls3/outputs/dry_run_fixed2",
+    "destination": "before/budget_biodiv_cls3/outputs/dry_run_fixed2"
+  },
+  {
+    "source": "budget_biodiv_cls3/outputs/dry_run_fixed3",
+    "destination": "before/budget_biodiv_cls3/outputs/dry_run_fixed3"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20261006_2024_3회비교/2024_울산_전체비교_3705건.csv.before_v7_rerun_20261007_162318.bak",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20261006_2024_3회비교/2024_울산_전체비교_3705건.csv.before_v7_rerun_20261007_162318.bak"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20261007_2023_3회비교/2023_분류결과_및_문서점검_통합.테두리수정전_20261008_170543.bak",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20261007_2023_3회비교/2023_분류결과_및_문서점검_통합.테두리수정전_20261008_170543.bak"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20261007_2023_3회비교/2023_전체비교_3972건.csv.문서보유표시전_20261008_165616.bak",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20261007_2023_3회비교/2023_전체비교_3972건.csv.문서보유표시전_20261008_165616.bak"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20261007_2023_3회비교/20261008_문서및근거점검/2023_전체비교_3972건_수정전.bak",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20261007_2023_3회비교/20261008_문서및근거점검/2023_전체비교_3972건_수정전.bak"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20261007_2023_3회비교/수정전_v9_22건재분류_20261008_145041",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20261007_2023_3회비교/수정전_v9_22건재분류_20261008_145041"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20261007_2023_3회비교/수정전_정답비교추가_20261008_102632",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20261007_2023_3회비교/수정전_정답비교추가_20261008_102632"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20261008_2023_검토22건_v9_3회/classify_biofin_category_with_ollama.py.v8.bak",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20261008_2023_검토22건_v9_3회/classify_biofin_category_with_ollama.py.v8.bak"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20261008_2023_검토22건_v9_3회/classify_biofin_category_with_vllm.py.v8.bak",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20261008_2023_검토22건_v9_3회/classify_biofin_category_with_vllm.py.v8.bak"
+  },
+  {
+    "source": "budget_biodiv_cls3/llm/v1/outputs/20261008_2023_검토22건_v9_3회/test_prompt_revision.py.v8.bak",
+    "destination": "before/budget_biodiv_cls3/llm/v1/outputs/20261008_2023_검토22건_v9_3회/test_prompt_revision.py.v8.bak"
+  }
+]

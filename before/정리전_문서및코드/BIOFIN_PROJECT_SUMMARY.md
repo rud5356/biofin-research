@@ -102,7 +102,7 @@ LLM v1에서는 정제된 본문에서 `사업목적` 또는 `목적` 항목부�
 
 위 숫자는 현재 코드의 기본값이며 모든 과거 실험의 실행값을 뜻하지 않는다. 사전학습 Transformer 자체를 처음부터 구현한 것이 아니라, 이를 문서 단위 분류에 적용하는 청크 처리와 Attention Pooling 계층을 구성한 것이다.
 
-근거: [임베딩·DB 저장](before/budget_biodiv_cls/src/embed_biodiv_chunks_to_postgres.py), [문서 분류 모델](budget_biodiv_cls3/transformer/v1/src/model.py), [학습 코드](budget_biodiv_cls3/transformer/v1/src/train_attention_classifier.py).
+근거: [임베딩·DB 저장](budget_biodiv_cls/src/embed_biodiv_chunks_to_postgres.py), [문서 분류 모델](budget_biodiv_cls3/transformer/v1/src/model.py), [학습 코드](budget_biodiv_cls3/transformer/v1/src/train_attention_classifier.py).
 
 ## 7. LLM 적용 방법
 
@@ -183,7 +183,7 @@ LLM은 정답 컬럼과 예측을 비교하여 정확도·Macro Precision/Recall
 | HWP 파싱·사업목적 추출 | `llm/document_parser.py`, `llm/business_purpose.py` | HWP 본문·제어 블록 처리, 파싱 대체 경로, 목적 섹션 추출 |
 | BIOFIN LLM 분류 | `llm/v1/classify_biofin_category_with_ollama.py` | 분류 프롬프트, API 호출, 응답 검증, 캐시·재시도 및 평가 |
 | 계층 라벨 정규화 | `transformer/v2/src/build_dataset.py` | 상·하위 코드 결합, 일관성 검증 및 클래스 매핑 |
-| 문서 임베딩·저장 | `before/budget_biodiv_cls/src/embed_biodiv_chunks_to_postgres.py`（저장소 루트 기준） | 청크 임베딩, pooling·정규화 및 PostgreSQL 저장 처리 |
+| 문서 임베딩·저장 | `budget_biodiv_cls/src/embed_biodiv_chunks_to_postgres.py`（저장소 루트 기준） | 청크 임베딩, pooling·정규화 및 PostgreSQL 저장 처리 |
 | 수집·보고서·검증 화면 | `crawlers/`（저장소 루트 기준）, `reports/`, `web/` | 재정자료 크롤러, 분류 결과 보고서 생성, 전문가 검증 UI 프로토타입 |
 
 표의 상대 경로는 별도 표시가 없으면 `budget_biodiv_cls3/` 기준이다. PyTorch·Transformers·사전학습 모델·문서 파싱 라이브러리를 활용하여 프로젝트에 필요한 데이터 처리, 모델 구성, 추론 및 평가 로직을 직접 구현했다.

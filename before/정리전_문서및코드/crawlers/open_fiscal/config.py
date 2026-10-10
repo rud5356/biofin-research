@@ -6,7 +6,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # 기존 분류 파이프라인과의 호환성을 위해 입출력 기본 경로를 유지한다.
-BASE_DIR = REPO_ROOT / "before" / "budget_biodiv_cls2" / "outputs"
+BASE_DIR = REPO_ROOT / "budget_biodiv_cls2" / "outputs"
 SAVE_DIR = REPO_ROOT / "crawlers" / "open_fiscal" / "outputs"
 
 SITE_URL = "https://www.openfiscaldata.go.kr/op/ko/bs/UOPKOBSA02"

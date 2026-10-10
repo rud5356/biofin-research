@@ -16,7 +16,7 @@ from crawlers.open_fiscal.crawl_business_docs import (
 
 class OpenFiscalConfigTest(unittest.TestCase):
     def test_default_base_dir_points_to_existing_pipeline_output(self) -> None:
-        expected = config.REPO_ROOT / "before" / "budget_biodiv_cls2" / "outputs"
+        expected = config.REPO_ROOT / "budget_biodiv_cls2" / "outputs"
         self.assertEqual(config.BASE_DIR, expected)
 
     def test_open_fiscal_urls_use_expected_host(self) -> None:
