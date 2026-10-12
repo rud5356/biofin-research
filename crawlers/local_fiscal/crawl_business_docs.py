@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""지방재정365의 세부사업 목록을 수집하고 상세 화면을 PDF로 저장한다."""
+"""지방재정365 Open API로 세부사업 목록을 수집하고 상세 화면을 PDF로 저장한다."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import argparse
 import asyncio
 import csv
 import logging
-import math
 import re
+import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,30 +17,33 @@ from typing import Any
 from urllib.parse import urlencode
 
 try:
+    from ..openapi import get_api_key, iter_rows
     from .config import (
+        API_KEY_ENV,
+        API_URL,
         BASE_DIR,
         DEFAULT_DATE,
         DEFAULT_LIMIT,
         DETAIL_SETTLE_MS,
         DETAIL_URL,
-        LIST_URL,
         MANIFEST_PATH,
         PAGE_TIMEOUT_MS,
-        ROWS_PER_PAGE,
         SAVE_DIR,
         TARGET_REGIONS,
     )
 except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from openapi import get_api_key, iter_rows  # type: ignore[no-redef]
     from config import (  # type: ignore[no-redef]
+        API_KEY_ENV,
+        API_URL,
         BASE_DIR,
         DEFAULT_DATE,
         DEFAULT_LIMIT,
         DETAIL_SETTLE_MS,
         DETAIL_URL,
-        LIST_URL,
         MANIFEST_PATH,
         PAGE_TIMEOUT_MS,
-        ROWS_PER_PAGE,
         SAVE_DIR,
         TARGET_REGIONS,
     )
@@ -61,32 +64,33 @@ LOG = logging.getLogger("local_fiscal")
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WHITESPACE = re.compile(r"\s+")
 
-MANIFEST_COLUMNS = [
-    "key",
-    "region_code",
-    "region",
-    "local_government",
-    "local_code",
-    "fiscal_year",
-    "reference_date",
-    "account",
-    "business_name",
-    "field",
-    "sector",
-    "budget_total",
-    "budget_national",
-    "budget_province",
-    "budget_local",
-    "budget_other",
-    "expenditure",
-    "balance",
-    "dbiz_code",
-    "detail_url",
-    "pdf_file",
-    "status",
-    "error",
-    "updated_at",
-]
+# CSV 컬럼명 → 내부 항목명. 예측·LLM 분류 코드가 읽는 한글 컬럼명에 맞춘다.
+MANIFEST_COLUMNS = {
+    "회계연도": "fiscal_year",
+    "소관명": "local_government",
+    "회계명": "account",
+    "분야명": "field",
+    "부문명": "sector",
+    "세부사업명": "business_name",
+    "예산액": "budget_total",
+    "business_key": "key",
+    "사업설명자료_파일명": "pdf_file",
+    "다운로드상태": "status",
+    "오류내용": "error",
+    "시도코드": "region_code",
+    "시도명": "region",
+    "지방자치단체코드": "local_code",
+    "기준일자": "reference_date",
+    "국비": "budget_national",
+    "시도비": "budget_province",
+    "시군구비": "budget_local",
+    "기타재원": "budget_other",
+    "지출액": "expenditure",
+    "잔액": "balance",
+    "세부사업코드": "dbiz_code",
+    "상세페이지_URL": "detail_url",
+    "갱신일시": "updated_at",
+}
 
 
 @dataclass(frozen=True)
@@ -110,6 +114,7 @@ class CrawlConfig:
     overwrite: bool
     retry_failed: bool
     list_only: bool
+    api_key: str = ""
 
     @property
     def compact_date(self) -> str:
@@ -123,7 +128,7 @@ class CrawlConfig:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "지방재정365 지정 지역의 세부사업별 세출현황을 수집하고 "
+            "지방재정365 Open API로 지정 지역의 세부사업별 세출현황을 수집하고 "
             "상세 화면을 PDF로 저장"
         )
     )
@@ -139,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=int,
         default=DEFAULT_LIMIT,
-        help="처리할 최대 사업 수(기본 5, 전체는 0)",
+        help="지역별 최대 사업 수(기본 5, 전체는 0). 인증키가 없으면 5까지만 가능",
     )
     parser.add_argument("--output-dir", type=Path, default=SAVE_DIR)
     parser.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
@@ -198,6 +203,7 @@ def parse_config(args: argparse.Namespace) -> CrawlConfig:
         overwrite=args.overwrite,
         retry_failed=args.retry_failed,
         list_only=args.list_only,
+        api_key=get_api_key(API_KEY_ENV),
     )
 
 
@@ -241,17 +247,25 @@ def _money(value: Any) -> str:
         return str(value)
 
 
+def _balance(budget: Any, expenditure: Any) -> str:
+    # Open API는 집행잔액을 주지 않으므로 예산현액에서 지출액을 뺀다.
+    try:
+        return str(int(budget) - int(expenditure))
+    except (TypeError, ValueError):
+        return ""
+
+
 def normalize_business(
     raw: dict[str, Any],
     cfg: CrawlConfig,
     region: RegionSpec,
 ) -> dict[str, str]:
-    dbiz_code = str(raw.get("code") or "")
-    local_code = str(raw.get("lafCd") or "")
-    fiscal_year = str(raw.get("rsltYr") or cfg.fiscal_year)
-    business_name = str(raw.get("codeNm4") or "").strip()
-    region_name = str(raw.get("codeNm") or region.name).strip()
-    local_unit = str(raw.get("codeNm2") or "").strip()
+    dbiz_code = str(raw.get("dbiz_cd") or "")
+    local_code = str(raw.get("laf_cd") or "")
+    fiscal_year = str(raw.get("fyr") or cfg.fiscal_year)
+    business_name = str(raw.get("dbiz_nm") or "").strip()
+    region_name = str(raw.get("wa_laf_hg_nm") or region.name).strip()
+    local_unit = str(raw.get("laf_hg_nm") or "").strip()
     local_government = (
         local_unit if local_unit.startswith(region_name) else f"{region_name}{local_unit}"
     )
@@ -264,17 +278,17 @@ def normalize_business(
         "local_code": local_code,
         "fiscal_year": fiscal_year,
         "reference_date": cfg.reference_date,
-        "account": str(raw.get("codeNm3") or ""),
+        "account": str(raw.get("acnt_dv_nm") or ""),
         "business_name": business_name,
-        "field": str(raw.get("codeNm5") or ""),
-        "sector": str(raw.get("codeNm6") or ""),
-        "budget_total": _money(raw.get("amt1")),
-        "budget_national": _money(raw.get("amt2")),
-        "budget_province": _money(raw.get("amt3")),
-        "budget_local": _money(raw.get("amt4")),
-        "budget_other": _money(raw.get("amt5")),
-        "expenditure": _money(raw.get("amt6")),
-        "balance": _money(raw.get("amt7")),
+        "field": str(raw.get("fld_nm") or ""),
+        "sector": str(raw.get("part_nm") or ""),
+        "budget_total": _money(raw.get("bdg_cash_amt")),
+        "budget_national": _money(raw.get("bdg_ntep")),
+        "budget_province": _money(raw.get("capep")),
+        "budget_local": _money(raw.get("sggep")),
+        "budget_other": _money(raw.get("etc_amt")),
+        "expenditure": _money(raw.get("ep_amt")),
+        "balance": _balance(raw.get("bdg_cash_amt"), raw.get("ep_amt")),
         "dbiz_code": dbiz_code,
         "detail_url": detail_url(dbiz_code, local_code, fiscal_year, cfg.reference_date),
         "pdf_file": "",
@@ -289,21 +303,24 @@ def normalize_business(
 def read_manifest(path: Path) -> dict[str, dict[str, str]]:
     if not path.exists():
         return {}
+    manifest: dict[str, dict[str, str]] = {}
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        return {
-            row["key"]: row
-            for row in csv.DictReader(handle)
-            if row.get("key")
-        }
+        for raw in csv.DictReader(handle):
+            # 영문 컬럼으로 저장된 예전 매니페스트도 이어받을 수 있게 둘 다 읽는다.
+            row = {name: raw.get(column) or raw.get(name) or "" for column, name in MANIFEST_COLUMNS.items()}
+            if row["key"]:
+                manifest[row["key"]] = row
+    return manifest
 
 
 def write_manifest(path: Path, rows: Iterable[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(path.suffix + ".tmp")
     with temp_path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=MANIFEST_COLUMNS, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+        writer = csv.writer(handle)
+        writer.writerow(MANIFEST_COLUMNS)
+        for row in rows:
+            writer.writerow([row.get(name, "") for name in MANIFEST_COLUMNS.values()])
     temp_path.replace(path)
 
 
@@ -321,128 +338,31 @@ def merge_manifest(
     return merged
 
 
-async def configure_search(page: Page, cfg: CrawlConfig, region: RegionSpec) -> None:
-    await page.goto(LIST_URL, wait_until="networkidle", timeout=cfg.timeout_ms)
-
-    # 날짜 변경 이벤트가 자치단체 목록을 비동기로 다시 만들기 때문에 화면에서
-    # 순차 클릭하면 선택값이 초기화될 수 있다. 검색 폼이 서버로 전송하는 값을
-    # 한 번에 설정한 뒤 기존 검색 함수를 호출한다.
-    async with page.expect_response(
-        lambda response: "retvLstTxrvSituSgg.do" in response.url,
-        timeout=cfg.timeout_ms,
-    ):
-        await page.evaluate(
-            """(values) => {
-                const setValue = (selector, value) => {
-                    const element = document.querySelector(selector);
-                    if (element) element.value = value;
-                };
-                const regionSelect = document.querySelector('#inqCap');
-                if (regionSelect && ![...regionSelect.options].some(
-                    option => option.value === values.regionCode
-                )) {
-                    regionSelect.add(new Option(values.regionName, values.regionCode));
-                }
-                setValue('#subCode', values.regionCode);
-                setValue('#inqCap', values.regionCode);
-                setValue('#inqSgg', '');
-                setValue('#inqDtaCd', '');
-                setValue('#inqDtaCd2', '');
-                setValue('#inqYmd', values.referenceDate);
-                setValue('#inqBgngYmd', values.compactDate);
-                setValue('#inqYr', values.fiscalYear);
-                window.lf.search('1');
-            }""",
-            {
-                "regionCode": region.code,
-                "regionName": region.name,
-                "referenceDate": cfg.reference_date,
-                "compactDate": cfg.compact_date,
-                "fiscalYear": cfg.fiscal_year,
-            },
-        )
-    await page.wait_for_timeout(300)
-    await page.wait_for_function(
-        "() => Array.isArray(window.list)", timeout=cfg.timeout_ms
-    )
-
-
-async def current_list(page: Page) -> list[dict[str, Any]]:
-    return await page.evaluate(
-        """() => window.list.map(row => ({
-            code: row.code,
-            lafCd: row.lafCd,
-            codeNm: row.codeNm,
-            codeNm2: row.codeNm2,
-            codeNm3: row.codeNm3,
-            codeNm4: row.codeNm4,
-            codeNm5: row.codeNm5,
-            codeNm6: row.codeNm6,
-            rsltYr: row.rsltYr,
-            amt1: row.amt1,
-            amt2: row.amt2,
-            amt3: row.amt3,
-            amt4: row.amt4,
-            amt5: row.amt5,
-            amt6: row.amt6,
-            amt7: row.amt7
-        }))"""
-    )
-
-
-async def collect_region_list(
-    page: Page,
-    cfg: CrawlConfig,
-    region: RegionSpec,
-) -> list[dict[str, str]]:
-    await configure_search(page, cfg, region)
-    total_text = await page.locator(".stats em").inner_text()
-    total = int(total_text.replace(",", "").strip())
-    wanted = min(total, cfg.limit) if cfg.limit else total
-    total_pages = math.ceil(wanted / ROWS_PER_PAGE)
+def collect_region_list(cfg: CrawlConfig, region: RegionSpec) -> list[dict[str, str]]:
+    params = {
+        "fyr": cfg.fiscal_year,
+        "exe_ymd": cfg.compact_date,
+        "wa_laf_cd": region.code,
+    }
+    collected: list[dict[str, str]] = []
+    total = 0
+    for total, raw in iter_rows(API_URL, params, cfg.api_key, cfg.limit):
+        collected.append(normalize_business(raw, cfg, region))
+        if len(collected) % 10_000 == 0:
+            LOG.info("%s 목록 누적 %s건", region.name, f"{len(collected):,}")
     LOG.info(
-        "%s 조회 결과 %s건 중 %s건을 수집합니다.",
+        "%s 조회 결과 %s건 중 %s건을 수집했습니다.",
         region.name,
         f"{total:,}",
-        f"{wanted:,}",
+        f"{len(collected):,}",
     )
-
-    collected: list[dict[str, str]] = []
-    for page_number in range(1, total_pages + 1):
-        if page_number > 1:
-            async with page.expect_response(
-                lambda response: "retvLstTxrvSituSgg.do" in response.url,
-                timeout=cfg.timeout_ms,
-            ):
-                await page.evaluate("(number) => window.lf.search(String(number))", page_number)
-            await page.wait_for_timeout(300)
-            await page.wait_for_function(
-                "() => Array.isArray(window.list)", timeout=cfg.timeout_ms
-            )
-
-        raw_rows = await current_list(page)
-        for raw in raw_rows:
-            row = normalize_business(raw, cfg, region)
-            collected.append(row)
-            if len(collected) >= wanted:
-                break
-        LOG.info(
-            "%s 목록 %d/%d페이지: 누적 %d건",
-            region.name,
-            page_number,
-            total_pages,
-            len(collected),
-        )
-        if len(collected) >= wanted:
-            break
-
     return collected
 
 
-async def collect_business_list(page: Page, cfg: CrawlConfig) -> list[dict[str, str]]:
+def collect_business_list(cfg: CrawlConfig) -> list[dict[str, str]]:
     collected: list[dict[str, str]] = []
     for region in cfg.regions:
-        collected.extend(await collect_region_list(page, cfg, region))
+        collected.extend(collect_region_list(cfg, region))
     return collected
 
 
@@ -502,28 +422,27 @@ async def launch_browser(playwright: Any, cfg: CrawlConfig) -> Browser:
 
 
 async def run(cfg: CrawlConfig) -> int:
-    if async_playwright is None:
-        raise RuntimeError(
-            "Playwright가 필요합니다. `pip install playwright`와 "
-            "`playwright install chromium`을 실행하세요."
-        )
-
     cfg.manifest_path.parent.mkdir(parents=True, exist_ok=True)
     existing = read_manifest(cfg.manifest_path)
+
+    collected = collect_business_list(cfg)
+    rows = merge_manifest(collected, existing)
+    write_manifest(cfg.manifest_path, rows)
+    LOG.info("목록을 저장했습니다: %s", cfg.manifest_path)
+
+    if cfg.list_only:
+        return 0
+
+    if async_playwright is None:
+        raise RuntimeError(
+            "PDF 저장에는 Playwright가 필요합니다. `pip install playwright`와 "
+            "`playwright install chromium`을 실행하거나 --list-only로 실행하세요."
+        )
 
     async with async_playwright() as playwright:
         browser = await launch_browser(playwright, cfg)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 1000})
-            list_page = await context.new_page()
-            collected = await collect_business_list(list_page, cfg)
-            rows = merge_manifest(collected, existing)
-            write_manifest(cfg.manifest_path, rows)
-            LOG.info("목록을 저장했습니다: %s", cfg.manifest_path)
-
-            if cfg.list_only:
-                return 0
-
             detail_page = await context.new_page()
             for index, row in enumerate(rows, start=1):
                 if not should_process(row, cfg):

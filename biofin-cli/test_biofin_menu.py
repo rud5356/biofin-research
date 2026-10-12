@@ -4,6 +4,7 @@ from pathlib import Path
 import shlex
 import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 import biofin_menu as menu
@@ -62,6 +63,85 @@ class MenuTests(unittest.TestCase):
     def test_augmented_all(self):
         cmd = self.command([1, 1, 2, 1, 2, 2], "row_type,training_eligible\noriginal,1\n")
         self.assertNotIn("--augmentation_per_class", cmd)
+
+
+class CrawlTests(unittest.TestCase):
+    def command(self, choices, answers, existing=()):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "crawlers").mkdir()
+            (root / "crawlers" / "openapi.py").touch()
+            for name in existing:
+                (root / "document" / name).mkdir(parents=True)
+            answers = iter(answers)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), \
+                    patch("sys.argv", ["biofin_menu.py", "--project-dir", folder, "--dry-run"]), \
+                    patch.object(menu, "choose", side_effect=choices), \
+                    patch("builtins.input", side_effect=lambda prompt: next(answers, "")), \
+                    patch.object(menu.subprocess, "run") as run:
+                self.assertEqual(menu.main(), 0)
+                run.assert_not_called()
+            lines = output.getvalue().splitlines()
+            cmd = shlex.split(lines[lines.index("실행할 명령어:") + 1])
+            return cmd, output.getvalue()
+
+    def test_local_fiscal_region_and_folder(self):
+        cmd, text = self.command([3, 1, 2, 1], ["2024", "제주도", "강원 세종", "", "0", "내자료"])
+        self.assertEqual(cmd[:9], ["docker", "exec", "-it", "-w", "/work/biofin_cls3", "biofin", "python", "-u",
+                                   "crawlers/local_fiscal/crawl_business_docs.py"])
+        self.assertEqual(cmd[cmd.index("--regions") + 1:cmd.index("--date")], ["강원", "세종"])
+        self.assertEqual(cmd[cmd.index("--date") + 1], "2024-12-31")
+        self.assertEqual(cmd[cmd.index("--limit") + 1], "0")
+        self.assertEqual(cmd[cmd.index("--manifest") + 1], "document/내자료/내자료.csv")
+        self.assertEqual(cmd[cmd.index("--output-dir") + 1], "document/내자료/사업설명자료")
+        self.assertIn("--list-only", cmd)
+        self.assertNotIn("--browser-channel", cmd)
+        self.assertIn("LOFIN365_API_KEY", text)
+
+    def test_local_fiscal_default_folder_and_pdf(self):
+        cmd, _ = self.command([3, 1, 2, 2], ["2024", "강원"])
+        self.assertEqual(cmd[cmd.index("--manifest") + 1], "document/강원_2024/강원_2024.csv")
+        self.assertEqual(cmd[cmd.index("--limit") + 1], "5")
+        self.assertNotIn("--list-only", cmd)
+        self.assertEqual(cmd[cmd.index("--browser-channel") + 1], "")
+
+    def test_existing_folder_needs_confirmation(self):
+        cmd, _ = self.command([3, 1, 1, 1], ["2024", "", "", "", "", "새폴더"], existing=["지방재정_2024"])
+        self.assertEqual(cmd[cmd.index("--manifest") + 1], "document/새폴더/새폴더.csv")
+        self.assertEqual(len(cmd[cmd.index("--regions") + 1:cmd.index("--date")]), 17)
+
+    def test_open_fiscal_saves_under_year(self):
+        cmd, _ = self.command([3, 2, 2], ["2024", "", "-"])
+        self.assertIn("crawlers/open_fiscal/crawl_business_docs.py", cmd)
+        self.assertEqual(cmd[cmd.index("--save-dir") + 1], "document")
+        self.assertEqual(cmd[cmd.index("--browser-channel") + 1], "")
+
+    def test_open_fiscal_api_list(self):
+        cmd, _ = self.command([3, 3], ["2023", "", "a/b", "예산목록"])
+        self.assertIn("crawlers/open_fiscal/api_budget_list.py", cmd)
+        self.assertEqual(cmd[cmd.index("--output") + 1], "document/예산목록/예산목록.csv")
+
+    def test_container_setup(self):
+        ok, fail = unittest.mock.Mock(returncode=0), unittest.mock.Mock(returncode=1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(menu.subprocess, "run") as run:
+                self.assertTrue(menu.prepare_container("biofin", []))
+                run.assert_not_called()
+            with patch.object(menu.subprocess, "run", return_value=ok) as run:
+                self.assertTrue(menu.prepare_container("biofin", ["playwright"]))
+                self.assertEqual(run.call_count, 1)
+            with patch.object(menu.subprocess, "run", return_value=fail) as run, \
+                    patch.object(menu, "ask", return_value="n"):
+                self.assertFalse(menu.prepare_container("biofin", ["playwright"]))
+                self.assertEqual(run.call_count, 1)
+            with patch.object(menu.subprocess, "run", side_effect=[fail, ok, ok]) as run, \
+                    patch.object(menu, "ask", return_value="y"):
+                self.assertTrue(menu.prepare_container("biofin", ["pandas", "playwright"]))
+                self.assertEqual(run.call_args_list[1][0][0],
+                                 ["docker", "exec", "biofin", "python", "-m", "pip", "install", "pandas", "playwright"])
+                self.assertEqual(run.call_args_list[2][0][0][3:],
+                                 ["python", "-m", "playwright", "install", "--with-deps", "chromium"])
 
 
 if __name__ == "__main__":

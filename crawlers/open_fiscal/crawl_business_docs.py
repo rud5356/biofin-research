@@ -574,6 +574,9 @@ async def _fetch_year_candidates(
                     "pageSize": "5000",
                     "totalCnt": total_count or "0",
                     "acntYr": str(year),
+                    # 2026-09 사이트 개편으로 추가된 예산확정구분(1=정부안, 2=국회확정).
+                    # 이 값이 없으면 사업설명자료 파일명과 예산액이 비어서 온다.
+                    "bdgCfmtnDivCd": "2",
                     "offcCd": "",
                     "acntCd": "",
                     "fldCd": "",
@@ -1011,7 +1014,13 @@ async def _download_url(
         )
         extension = Path(original_name).suffix.lower()
         if extension not in ALLOWED_EXTENSIONS:
-            detected = _extension_from_content_type(headers.get("content-type", ""))
+            # 2026-09 개편 이후 목록의 파일명에 확장자가 없으므로 응답 헤더의
+            # 파일명에서 확장자를 얻는다.
+            detected = Path(
+                _filename_from_disposition(headers.get("content-disposition", ""))
+            ).suffix.lower()
+            if detected not in ALLOWED_EXTENSIONS:
+                detected = _extension_from_content_type(headers.get("content-type", ""))
             if detected:
                 original_name = f"{Path(original_name).stem or '사업설명자료'}{detected}"
                 extension = detected

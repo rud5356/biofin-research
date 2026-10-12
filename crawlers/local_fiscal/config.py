@@ -8,7 +8,9 @@ BASE_DIR = REPO_ROOT / "crawlers" / "local_fiscal" / "outputs"
 SAVE_DIR = BASE_DIR / "사업설명자료"
 MANIFEST_PATH = BASE_DIR / "metropolitan_2024_manifest.csv"
 
-LIST_URL = "https://www.lofin365.go.kr/portal/LF3120202.do"
+# 세부사업별 세출현황 Open API. 인증키는 저장소 루트의 `.env`에서 읽는다.
+API_URL = "https://www.lofin365.go.kr/lf/hub/QWGJK"
+API_KEY_ENV = "LOFIN365_API_KEY"
 DETAIL_URL = "https://www.lofin365.go.kr/portal/LF3120204.do"
 
 # 지방재정365 지역 선택값. 순서대로 수집한다.
@@ -28,7 +30,7 @@ TARGET_REGIONS = {
     "경북": "47",
     "경남": "48",
     "제주": "49",
-    # 지방재정365 조회 API는 특별자치도 출범 이후 자료에도 자체 시도
+    # 지방재정365는 특별자치도 출범 이후 자료에도 자체 시도
     # 코드(세종 32, 제주 49, 강원 42, 전북 45)를 사용한다.
     "강원": "42",
     "전북": "45",
@@ -37,6 +39,5 @@ TARGET_REGIONS = {
 DEFAULT_DATE = "2024-12-31"
 DEFAULT_LIMIT = 5
 
-ROWS_PER_PAGE = 100
 PAGE_TIMEOUT_MS = 60_000
 DETAIL_SETTLE_MS = 800

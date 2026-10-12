@@ -43,7 +43,7 @@ def integer(prompt, default, minimum=1):
 def project_path(prompt, default, root, kind):
     root = root.resolve()
     suggested = root / default
-    current = suggested.parent if kind in ("file", "output") else suggested
+    current = suggested if kind == "dir" or suggested.is_dir() else suggested.parent
     while not current.is_dir():
         current = current.parent
     current = current.resolve()
@@ -120,16 +120,155 @@ def project_path(prompt, default, root, kind):
         return relative.as_posix()
 
 
+REGIONS = ["서울", "부산", "대구", "대전", "인천", "광주", "울산", "세종", "경기",
+           "충북", "충남", "전남", "경북", "경남", "제주", "강원", "전북"]
+
+
+def folder_name(prompt, default, parent):
+    while True:
+        name = ask(prompt, default)
+        if name in (".", "..") or "/" in name or "\\" in name or "\x00" in name or Path(name).is_absolute():
+            print("경로가 아닌 폴더 이름 하나만 입력해주세요.")
+            continue
+        if (parent / name).exists():
+            print(f"이미 있는 폴더입니다: {parent / name}\n받아 둔 파일은 건너뛰고 이어서 수집합니다.")
+            if ask("이 폴더를 사용할까요? (y/N)", "n").lower() != "y":
+                continue
+        return name
+
+
+def has_key(crawler_dir, name):
+    try:
+        lines = (crawler_dir.parent / ".env").read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return False
+    return any(line.split("=", 1)[0].strip() == name and line.split("=", 1)[1].strip()
+               for line in lines if "=" in line and not line.lstrip().startswith("#"))
+
+
+BROWSER_CHECK = ("from playwright.sync_api import sync_playwright\n"
+                 "with sync_playwright() as p:\n"
+                 "    p.chromium.launch().close()\n")
+
+
+def crawl_command(root, crawler_dir):
+    crawlers = (Path(crawler_dir).expanduser() if crawler_dir else root / "crawlers").resolve()
+    if not (crawlers / "openapi.py").is_file():
+        raise RuntimeError(f"crawlers 폴더가 없습니다: {crawlers}")
+    try:
+        crawlers_path = crawlers.relative_to(root).as_posix()
+    except ValueError:
+        raise RuntimeError(f"crawlers 폴더는 프로젝트 폴더 안에 있어야 합니다: {root}")
+    document = root / "document"
+    source = choose("수집 대상", ["지방재정365 (세부사업 목록 + 상세 PDF)",
+                               "열린재정 (세부사업 목록 + 사업설명자료)",
+                               "열린재정 Open API 예산 목록 (CSV만)"])
+    year = integer("회계연도", datetime.date.today().year - 1, 2000)
+    modules = []
+    if source == 1:
+        script, key = "local_fiscal/crawl_business_docs.py", "LOFIN365_API_KEY"
+        regions = REGIONS
+        if choose("지역 선택", ["전국 17개 시도", "직접 입력"]) == 2:
+            while True:
+                regions = ask("지역 이름 (공백으로 구분, 예: 강원 세종)").split()
+                unknown = [region for region in regions if region not in REGIONS]
+                if not unknown:
+                    break
+                print(f"알 수 없는 지역: {' '.join(unknown)}\n선택 가능: {' '.join(REGIONS)}")
+        date = ask("기준일 (YYYY-MM-DD)", f"{year}-12-31")
+        list_only = choose("수집 범위", ["목록만", "목록 + 상세 PDF"]) == 1
+        limit = integer("지역별 최대 사업 수 (0: 전체)", 5, 0)
+        name = folder_name("저장 폴더 이름", f"{regions[0] if len(regions) == 1 else '지방재정'}_{year}", document)
+        target = f"document/{name}"
+        options = ["--regions", *regions, "--date", date, "--limit", limit,
+                   "--manifest", f"{target}/{name}.csv", "--output-dir", f"{target}/사업설명자료"]
+        if not list_only:
+            modules = ["playwright"]
+    elif source == 2:
+        script, key = "open_fiscal/crawl_business_docs.py", None
+        list_only = choose("수집 범위", ["목록만", "목록 + 사업설명자료"]) == 1
+        limit = integer("최대 사업 수 (0: 전체)", 5, 0)
+        print(f"열린재정은 <상위 폴더>/{year}/ 아래에 저장합니다. 상위 폴더가 필요 없으면 -를 입력하세요.")
+        name = folder_name("상위 폴더 이름", "-", document)
+        parent = "document" if name == "-" else f"document/{name}"
+        target = f"{parent}/{year}"
+        options = ["--year", year, "--limit", limit, "--save-dir", parent]
+        modules = ["pandas", "openpyxl", "tqdm", "playwright"]
+    else:
+        script, key = "open_fiscal/api_budget_list.py", "OPENFISCAL_API_KEY"
+        list_only = False
+        limit = integer("최대 사업 수 (0: 전체)", 0, 0)
+        name = folder_name("저장 폴더 이름", f"열린재정_API_{year}", document)
+        target = f"document/{name}"
+        options = ["--year", year, "--limit", limit, "--output", f"{target}/{name}.csv"]
+    if list_only:
+        options.append("--list-only")
+    if modules:
+        # 컨테이너에는 Chrome이 없으므로 Playwright에 포함된 Chromium을 쓴다.
+        options += ["--browser-channel", ""]
+    if key and not has_key(crawlers, key):
+        print(f"안내: {crawlers.parent / '.env'}에 {key}가 없습니다. 인증키 없이는 5건까지만 받을 수 있습니다.")
+    container = ask("Docker 컨테이너 이름", "biofin")
+    workdir = ask("컨테이너 내부 프로젝트 경로", "/work/biofin_cls3")
+    print(f"저장 위치: {root / target}")
+    print("안내: 호스트 프로젝트와 컨테이너 내부 프로젝트가 같은 폴더를 가리켜야 합니다.")
+    cmd = ["docker", "exec", "-it", "-w", workdir, container, "python", "-u", f"{crawlers_path}/{script}", *options]
+    return cmd, container, modules
+
+
+def prepare_container(container, modules):
+    """수집에 필요한 패키지와 브라우저가 컨테이너에 없으면 물어본 뒤 설치한다."""
+    if not modules:
+        return True
+    check = "".join(f"import {module}\n" for module in modules) + BROWSER_CHECK
+    quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if subprocess.run(["docker", "exec", container, "python", "-c", check], **quiet).returncode == 0:
+        return True
+    print(f"\n컨테이너({container})에 수집에 필요한 프로그램이 없습니다: {', '.join(modules)}, Chromium")
+    if ask("지금 설치할까요? 몇 분 걸립니다. (y/N)", "n").lower() != "y":
+        print("설치하지 않아 수집을 시작하지 않았습니다.")
+        return False
+    for step in (["python", "-m", "pip", "install", *modules],
+                 ["python", "-m", "playwright", "install", "--with-deps", "chromium"]):
+        if subprocess.run(["docker", "exec", container, *step]).returncode != 0:
+            print("설치에 실패했습니다. 위 오류 내용을 관리자에게 전달해주세요.")
+            return False
+    print("설치를 마쳤습니다.")
+    return True
+
+
+def run_command(cmd, root, dry_run, prepare=None):
+    print("\n실행할 명령어:\n" + shlex.join(cmd))
+    if dry_run:
+        print("미리보기 완료: 실행하지 않았습니다.")
+        return 0
+    if ask("실행할까요? (y/N)", "n").lower() != "y":
+        print("취소했습니다.")
+        return 0
+    if not shutil.which("docker"):
+        raise RuntimeError("docker 명령어를 찾을 수 없습니다.")
+    if prepare and not prepare():
+        return 1
+    result = subprocess.run(cmd, cwd=root)
+    print("\n완료했습니다." if result.returncode == 0 else f"\n실패했습니다. 종료 코드: {result.returncode}")
+    return result.returncode
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-dir", default=os.getcwd(), help="호스트의 biofin_cls3 프로젝트 경로")
+    parser.add_argument("--crawler-dir", help="프로젝트 폴더 안의 crawlers 폴더 경로 (기본: crawlers)")
     parser.add_argument("--dry-run", action="store_true", help="명령어만 출력하고 실행하지 않음")
     args = parser.parse_args()
     root = Path(args.project_dir).expanduser().resolve()
     if not root.is_dir():
         parser.error(f"프로젝트 폴더가 없습니다: {root}")
     print(f"BIOFIN 실행 도우미\n프로젝트: {root}\n파일과 폴더는 목록에서 번호로 선택하세요.")
-    training = choose("작업 선택", ["모델 학습", "모델 예측"]) == 1
+    task = choose("작업 선택", ["모델 학습", "모델 예측", "자료 수집 (크롤러)"])
+    if task == 3:
+        cmd, container, modules = crawl_command(root, args.crawler_dir)
+        return run_command(cmd, root, args.dry_run, lambda: prepare_container(container, modules))
+    training = task == 1
     backend = choose("모델 선택", ["Transformer", "LLM (Ollama)", "LLM (vLLM API)"])
     transformer = backend == 1
     vllm = backend == 3
@@ -138,10 +277,8 @@ def main():
     augmentation = None
     if transformer and training:
         augmentation = choose("학습 데이터 선택", ["원본만 사용", "원본 + 증강 통합 CSV 사용"])
-    data = "260812_2023data.csv" if training else "울산_환경부_2024/울산_환경부_2024.csv"
-    docs = "2023/사업설명자료" if training else "울산_환경부_2024/사업설명자료"
     while True:
-        input_file = project_path("원본 + 증강 통합 CSV" if augmentation == 2 else "입력 CSV", f"document/{data}", root, "file")
+        input_file = project_path("원본 + 증강 통합 CSV" if augmentation == 2 else "입력 CSV", "document", root, "file")
         if augmentation != 2:
             break
         try:
@@ -152,7 +289,7 @@ def main():
         except UnicodeDecodeError:
             pass
         print("증강 학습에는 row_type, training_eligible 컬럼이 있는 UTF-8 통합 CSV를 선택해주세요.")
-    doc_dir = project_path("사업설명자료 폴더", f"document/{docs}", root, "dir")
+    doc_dir = project_path("사업설명자료 폴더", "document", root, "dir")
     family = "transformer" if transformer else "llm"
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     output = project_path("결과 저장 폴더", f"{family}/v1/outputs/{stamp}", root, "output")
@@ -214,18 +351,7 @@ def main():
             cmd += ["--retries", retries]
     if not (root / script).is_file():
         raise RuntimeError(f"실행 스크립트가 없습니다: {root / script}")
-    print("\n실행할 명령어:\n" + shlex.join(cmd))
-    if args.dry_run:
-        print("미리보기 완료: 실행하지 않았습니다.")
-        return 0
-    if ask("실행할까요? (y/N)", "n").lower() != "y":
-        print("취소했습니다.")
-        return 0
-    if not shutil.which("docker"):
-        raise RuntimeError("docker 명령어를 찾을 수 없습니다.")
-    result = subprocess.run(cmd, cwd=root)
-    print("\n완료했습니다." if result.returncode == 0 else f"\n실패했습니다. 종료 코드: {result.returncode}")
-    return result.returncode
+    return run_command(cmd, root, args.dry_run)
 
 
 if __name__ == "__main__":

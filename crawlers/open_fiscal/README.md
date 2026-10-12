@@ -84,3 +84,25 @@ python crawl_business_docs.py --year 2024 --limit 0 --overwrite
 
 `--year`를 생략하면 기존처럼 `before/budget_biodiv_cls2/outputs`의 label=1 입력 CSV를
 읽어 해당 사업만 매칭하는 호환 모드로 실행됩니다.
+
+## Open API로 예산 목록 받기
+
+`api_budget_list.py`는 열린재정 정식 Open API(세부사업 예산편성현황(총액),
+`ExpenditureBudgetInit5`)로 회계연도의 세부사업 예산 목록을 받는 별도 도구입니다.
+기존 크롤러를 대체하지 않습니다.
+
+- Open API는 **사업설명자료 파일과 사업 코드를 제공하지 않습니다.** 문서
+  다운로드와 `business_key` 생성은 `crawl_business_docs.py`가 계속 맡습니다.
+- 정부안금액·국회확정금액의 공식 출처가 필요하거나 기존 목록의 누락을
+  점검할 때 사용합니다. 기존 CSV와는 이름(소관명~세부사업명)으로 연결해야 합니다.
+
+인증키는 [인증키 발급](https://www.openfiscaldata.go.kr/op/ko/ds/UOPKODSA03)에서
+받아 저장소 루트 `.env`의 `OPENFISCAL_API_KEY=` 뒤에 넣습니다. 인증키가 없으면
+5건까지만 받을 수 있습니다.
+
+```bash
+python api_budget_list.py --year 2024            # 시험 5건
+python api_budget_list.py --year 2024 --limit 0  # 전체(인증키 필요)
+```
+
+결과는 `outputs/2024/open_fiscal_2024_api.csv`에 저장됩니다.
