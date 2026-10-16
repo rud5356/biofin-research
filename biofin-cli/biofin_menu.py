@@ -10,6 +10,54 @@ import shutil
 import subprocess
 
 
+# ============================================================================
+# [사용 안내] 서버·모델·폴더가 바뀌면 아래 CONFIG 설정만 먼저 확인하세요.
+# 각 줄의 # 오른쪽은 설정의 뜻입니다. 따옴표 안의 값만 수정하면 됩니다.
+# 메뉴에서 Enter를 누르면 이 기본값이 사용되며, 실행할 때 다른 값을 입력할 수도 있습니다.
+# None은 별도 경로를 지정하지 않는다는 뜻입니다.
+# 비밀번호와 API 키의 실제 값은 코드에 적지 마세요.
+# ============================================================================
+CONFIG = {
+    # 1. 프로젝트 및 데이터 폴더
+    "PROJECT_DIR": None,                    # 서버의 프로젝트 폴더; None이면 현재 실행 폴더 사용
+    "CRAWLER_DIR": "crawlers",              # 예산자료 수집 프로그램이 들어 있는 폴더
+    "DOCUMENT_DIR": "document",            # 입력 CSV와 사업설명자료를 찾아볼 기본 폴더
+    "OUTPUT_SUBDIR": "v1/outputs",          # LLM·Transformer 결과를 저장할 하위 폴더
+
+    # 2. Docker 컨테이너 설정 (Transformer·크롤러)
+    "DOCKER_CONTAINER": "biofin",          # 이미 실행 중인 Docker 컨테이너 이름
+    "DOCKER_WORKDIR": "/work/biofin_cls3",  # Docker 컨테이너 안의 프로젝트 폴더 위치
+
+    # 3. LLM용 Docker 설정
+    "LLM_DOCKER_IMAGE": "python:3.11-slim", # LLM 실행에 사용하는 Docker 이미지 이름
+    "LLM_MOUNT_DIR": "/workspace",         # 서버의 프로젝트 폴더가 Docker 안에서 보이는 위치
+    "LLM_PYTHONPATH": "/workspace/llm/.packages", # Docker 안에서 Python 추가 패키지를 찾는 위치
+    "LLM_DOCKER_NETWORK": "host",          # Docker 네트워크 방식; host는 서버 네트워크 사용
+    "VLLM_API_KEY_ENV": "VLLM_API_KEY",     # vLLM 인증키가 저장된 환경변수 이름(키 값 아님)
+
+    # 4. AI 모델 서버 및 모델 선택
+    "VLLM_URL": "https://app-17a9ea75.proxy1.ainexus.ktcloud.com", # vLLM 모델 서버 접속 주소
+    "VLLM_MODEL": "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ", # vLLM 서버에 등록된 모델 ID
+    "OLLAMA_URL": "http://172.22.0.1:20001", # Ollama 모델 서버 접속 주소
+    "OLLAMA_MODEL": "gemma3:12b",           # Ollama에서 실행할 모델 이름
+    "TRANSFORMER_MODEL_DIR": "transformer/v1/outputs/260812_category_v1_zero50", # 학습된 Transformer 모델 폴더
+
+    # 5. 프로그램 파일 위치 (프로젝트 폴더를 기준으로 입력)
+    "TRANSFORMER_SCRIPT_DIR": "transformer/v1/src", # Transformer 학습·예측 프로그램 폴더
+    "LLM_SCRIPT_DIR": "llm/v1",            # LLM 분류 프로그램 폴더
+    "LOCAL_CRAWLER_SCRIPT": "local_fiscal/crawl_business_docs.py", # 지방재정 자료 수집 프로그램
+    "OPEN_FISCAL_CRAWLER_SCRIPT": "open_fiscal/crawl_business_docs.py", # 열린재정 자료 수집 프로그램
+    "OPEN_FISCAL_API_SCRIPT": "open_fiscal/api_budget_list.py", # 열린재정 API 목록 수집 프로그램
+
+    # 6. AI 분류 실행 기본값 (메뉴에서 필요할 때 변경 가능)
+    "MAX_DOCUMENT_CHARS": 6000,            # 사업목적에서 AI에 전달할 최대 글자 수
+    "MAX_TOKENS": 2048,                     # vLLM이 한 번에 생성할 수 있는 최대 응답 토큰 수
+    "WORKERS": 1,                          # vLLM API에 동시에 보낼 요청 수
+    "NUM_CTX": 8192,                       # Ollama 모델이 한 번에 처리할 문맥 크기(토큰)
+    "TIMEOUT": 300,                        # AI 서버 응답을 기다리는 최대 시간(초)
+}
+
+
 def ask(prompt, default=None):
     suffix = f" [{default}]" if default is not None else ""
     while True:
@@ -152,7 +200,7 @@ BROWSER_CHECK = ("from playwright.sync_api import sync_playwright\n"
 
 
 def crawl_command(root, crawler_dir):
-    crawlers = (Path(crawler_dir).expanduser() if crawler_dir else root / "crawlers").resolve()
+    crawlers = (Path(crawler_dir).expanduser() if crawler_dir else root / CONFIG["CRAWLER_DIR"]).resolve()
     if not (crawlers / "openapi.py").is_file():
         raise RuntimeError(f"crawlers 폴더가 없습니다: {crawlers}")
     try:
@@ -166,7 +214,7 @@ def crawl_command(root, crawler_dir):
     year = integer("회계연도", datetime.date.today().year - 1, 2000)
     modules = []
     if source == 1:
-        script, key = "local_fiscal/crawl_business_docs.py", "LOFIN365_API_KEY"
+        script, key = CONFIG["LOCAL_CRAWLER_SCRIPT"], "LOFIN365_API_KEY"
         regions = REGIONS
         if choose("지역 선택", ["전국 17개 시도", "직접 입력"]) == 2:
             while True:
@@ -185,7 +233,7 @@ def crawl_command(root, crawler_dir):
         if not list_only:
             modules = ["playwright"]
     elif source == 2:
-        script, key = "open_fiscal/crawl_business_docs.py", None
+        script, key = CONFIG["OPEN_FISCAL_CRAWLER_SCRIPT"], None
         list_only = choose("수집 범위", ["목록만", "목록 + 사업설명자료"]) == 1
         limit = integer("최대 사업 수 (0: 전체)", 5, 0)
         print(f"열린재정은 <상위 폴더>/{year}/ 아래에 저장합니다. 상위 폴더가 필요 없으면 -를 입력하세요.")
@@ -195,7 +243,7 @@ def crawl_command(root, crawler_dir):
         options = ["--year", year, "--limit", limit, "--save-dir", parent]
         modules = ["pandas", "openpyxl", "tqdm", "playwright"]
     else:
-        script, key = "open_fiscal/api_budget_list.py", "OPENFISCAL_API_KEY"
+        script, key = CONFIG["OPEN_FISCAL_API_SCRIPT"], "OPENFISCAL_API_KEY"
         list_only = False
         limit = integer("최대 사업 수 (0: 전체)", 0, 0)
         name = folder_name("저장 폴더 이름", f"열린재정_API_{year}", document)
@@ -208,8 +256,8 @@ def crawl_command(root, crawler_dir):
         options += ["--browser-channel", ""]
     if key and not has_key(crawlers, key):
         print(f"안내: {crawlers.parent / '.env'}에 {key}가 없습니다. 인증키 없이는 5건까지만 받을 수 있습니다.")
-    container = ask("Docker 컨테이너 이름", "biofin")
-    workdir = ask("컨테이너 내부 프로젝트 경로", "/work/biofin_cls3")
+    container = ask("Docker 컨테이너 이름", CONFIG["DOCKER_CONTAINER"])
+    workdir = ask("컨테이너 내부 프로젝트 경로", CONFIG["DOCKER_WORKDIR"])
     print(f"저장 위치: {root / target}")
     print("안내: 호스트 프로젝트와 컨테이너 내부 프로젝트가 같은 폴더를 가리켜야 합니다.")
     cmd = ["docker", "exec", "-it", "-w", workdir, container, "python", "-u", f"{crawlers_path}/{script}", *options]
@@ -256,7 +304,7 @@ def run_command(cmd, root, dry_run, prepare=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project-dir", default=os.getcwd(), help="호스트의 biofin_cls3 프로젝트 경로")
+    parser.add_argument("--project-dir", default=CONFIG["PROJECT_DIR"] or os.getcwd(), help="호스트의 biofin_cls3 프로젝트 경로")
     parser.add_argument("--crawler-dir", help="프로젝트 폴더 안의 crawlers 폴더 경로 (기본: crawlers)")
     parser.add_argument("--dry-run", action="store_true", help="명령어만 출력하고 실행하지 않음")
     args = parser.parse_args()
@@ -278,7 +326,7 @@ def main():
     if transformer and training:
         augmentation = choose("학습 데이터 선택", ["원본만 사용", "원본 + 증강 통합 CSV 사용"])
     while True:
-        input_file = project_path("원본 + 증강 통합 CSV" if augmentation == 2 else "입력 CSV", "document", root, "file")
+        input_file = project_path("원본 + 증강 통합 CSV" if augmentation == 2 else "입력 CSV", CONFIG["DOCUMENT_DIR"], root, "file")
         if augmentation != 2:
             break
         try:
@@ -289,14 +337,14 @@ def main():
         except UnicodeDecodeError:
             pass
         print("증강 학습에는 row_type, training_eligible 컬럼이 있는 UTF-8 통합 CSV를 선택해주세요.")
-    doc_dir = project_path("사업설명자료 폴더", "document", root, "dir")
+    doc_dir = project_path("사업설명자료 폴더", CONFIG["DOCUMENT_DIR"], root, "dir")
     family = "transformer" if transformer else "llm"
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    output = project_path("결과 저장 폴더", f"{family}/v1/outputs/{stamp}", root, "output")
+    output = project_path("결과 저장 폴더", f"{family}/{CONFIG['OUTPUT_SUBDIR']}/{stamp}", root, "output")
     if transformer:
-        container = ask("Docker 컨테이너 이름", "biofin")
-        workdir = ask("컨테이너 내부 프로젝트 경로", "/work/biofin_cls3")
-        script = f"transformer/v1/src/{'train' if training else 'predict'}_attention_classifier.py"
+        container = ask("Docker 컨테이너 이름", CONFIG["DOCKER_CONTAINER"])
+        workdir = ask("컨테이너 내부 프로젝트 경로", CONFIG["DOCKER_WORKDIR"])
+        script = f"{CONFIG['TRANSFORMER_SCRIPT_DIR']}/{'train' if training else 'predict'}_attention_classifier.py"
         cmd = ["docker", "exec", "-it", "-w", workdir, container, "python", "-u", script]
         if training:
             cmd += ["--label_file", input_file, "--doc_dir", doc_dir]
@@ -313,37 +361,37 @@ def main():
             if choose("클래스 가중치", ["사용", "사용하지 않음"]) == 1:
                 cmd += ["--class_weight"]
         else:
-            model_dir = project_path("학습된 모델 폴더", "transformer/v1/outputs/260812_category_v1_zero50", root, "dir")
+            model_dir = project_path("학습된 모델 폴더", CONFIG["TRANSFORMER_MODEL_DIR"], root, "dir")
             cmd += ["--model_dir", model_dir, "--budget_file", input_file, "--doc_dir", doc_dir,
                     "--filename_column", ask("파일명 컬럼", "사업설명자료_파일명")]
         cmd += ["--output_dir", output]
         print("안내: 호스트 프로젝트와 컨테이너 내부 프로젝트의 파일 구성이 같아야 합니다.")
     else:
-        script = f"llm/v1/classify_biofin_category_with_{'vllm' if vllm else 'ollama'}.py"
+        script = f"{CONFIG['LLM_SCRIPT_DIR']}/classify_biofin_category_with_{'vllm' if vllm else 'ollama'}.py"
         if not hasattr(os, "getuid"):
             raise RuntimeError("LLM Docker 실행은 Linux에서 사용해주세요.")
-        cmd = ["docker", "run", "--rm", "-it", "--network", "host", "--user", f"{os.getuid()}:{os.getgid()}",
-               "-e", "PYTHONPATH=/workspace/llm/.packages"]
+        cmd = ["docker", "run", "--rm", "-it", "--network", CONFIG["LLM_DOCKER_NETWORK"], "--user", f"{os.getuid()}:{os.getgid()}",
+               "-e", f"PYTHONPATH={CONFIG['LLM_PYTHONPATH']}"]
         if vllm:
-            cmd += ["-e", "VLLM_API_KEY"]
-        cmd += ["-v", f"{root}:/workspace", "-w", "/workspace",
-               "python:3.11-slim", "python", "-u", script,
-               "--input-file", f"/workspace/{input_file}", "--doc-dir", f"/workspace/{doc_dir}",
-               "--output-dir", f"/workspace/{output}"]
+            cmd += ["-e", CONFIG["VLLM_API_KEY_ENV"]]
+        cmd += ["-v", f"{root}:{CONFIG['LLM_MOUNT_DIR']}", "-w", CONFIG["LLM_MOUNT_DIR"],
+               CONFIG["LLM_DOCKER_IMAGE"], "python", "-u", script,
+               "--input-file", f"{CONFIG['LLM_MOUNT_DIR']}/{input_file}", "--doc-dir", f"{CONFIG['LLM_MOUNT_DIR']}/{doc_dir}",
+               "--output-dir", f"{CONFIG['LLM_MOUNT_DIR']}/{output}"]
         if vllm:
-            cmd += ["--vllm-url", ask("vLLM API URL", "https://app-17a9ea75.proxy1.ainexus.ktcloud.com"),
-                    "--model", ask("vLLM 모델 ID (/v1/models의 id)", "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ")]
+            cmd += ["--vllm-url", ask("vLLM API URL", CONFIG["VLLM_URL"]),
+                    "--model", ask("vLLM 모델 ID (/v1/models의 id)", CONFIG["VLLM_MODEL"])]
             print("최대 컨텍스트와 GPU 점유는 서버 설정입니다. 여기서는 응답 길이와 동시 요청 수를 정합니다.")
         else:
-            cmd += ["--ollama-url", ask("Ollama URL", "http://172.22.0.1:20001"),
-                    "--model", ask("Ollama 모델", "gemma3:12b")]
-        cmd += ["--max-document-chars", integer("사업목적 최대 문자 수", 6000)]
+            cmd += ["--ollama-url", ask("Ollama URL", CONFIG["OLLAMA_URL"]),
+                    "--model", ask("Ollama 모델", CONFIG["OLLAMA_MODEL"])]
+        cmd += ["--max-document-chars", integer("사업목적 최대 문자 수", CONFIG["MAX_DOCUMENT_CHARS"])]
         if vllm:
-            cmd += ["--max-tokens", integer("응답 최대 토큰 수", 2048),
-                    "--workers", integer("동시 API 요청 수", 1)]
+            cmd += ["--max-tokens", integer("응답 최대 토큰 수", CONFIG["MAX_TOKENS"]),
+                    "--workers", integer("동시 API 요청 수", CONFIG["WORKERS"])]
         else:
-            cmd += ["--num-ctx", integer("컨텍스트 크기", 8192)]
-        cmd += ["--timeout", integer("타임아웃(초)", 300)]
+            cmd += ["--num-ctx", integer("컨텍스트 크기", CONFIG["NUM_CTX"])]
+        cmd += ["--timeout", integer("타임아웃(초)", CONFIG["TIMEOUT"])]
         retries = ask("재시도 횟수 (default: 스크립트 기본값)", "3" if training else "default")
         while retries != "default" and not retries.isdigit():
             retries = ask("0 이상 정수 또는 default", "default")
