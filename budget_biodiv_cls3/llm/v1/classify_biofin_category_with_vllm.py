@@ -39,9 +39,15 @@ from business_purpose import extract_business_purpose, extract_legal_basis  # no
 DEFAULT_MODEL = "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ"
 DEFAULT_VLLM_URL = "https://app-17a9ea75.proxy1.ainexus.ktcloud.com"
 DEFAULT_INPUT_FILE = Path("document/2023biofin_label_matched.csv")
+# open_fiscal_2024_11ministries.csv의 소관명 11개를 사용합니다.
+TARGET_MINISTRIES: tuple[str, ...] = (
+    "과학기술정보통신부", "국토교통부", "농림축산식품부", "문화재청",
+    "산림청", "산업통상자원부", "식품의약품안전처", "외교부",
+    "질병관리청", "해양수산부", "환경부",
+)
 DEFAULT_LABEL_COLUMN = "LLM BIOFIN 1차 카테고리"
 DEFAULT_GOLD_LABEL_COLUMN = "BIOFIN 1차 카테고리"
-PROMPT_VERSION = "kr-biofin-category-2026-10-08-v9-numeric-review-vllm-v1"
+PROMPT_VERSION = "kr-biofin-category-2026-10-21-v10-current-activity-vllm-v1"
 VALID_LABELS = set(range(10))
 ENCODINGS = ("utf-8-sig", "cp949", "utf-8")
 
@@ -67,7 +73,7 @@ SYSTEM_PROMPT = """\
 관련성이 확인된 경우에만 1~9 중 정확히 하나를 선택한다.
 
 키워드는 판정의 단서일 뿐 포함 근거가 아니다.
-사업의 실제 목적, 대상, 활동, 법적 근거와 기관 기능을 기준으로 판정한다.
+현재 사업이 직접 수행하는 활동과 대상, 기관 기능을 먼저 확인하고 사업 목적과 법적 근거를 보조하여 판정한다.
 
 # 출력값
 
@@ -98,7 +104,7 @@ SYSTEM_PROMPT = """\
 1. 구체적인 대상·활동에 대한 명시적 포함·제외 규칙을 먼저 찾는다.
 2. 명시적 포함 활동에는 일반 산업지원·인프라·보건 같은 포괄적 제외를 덮어씌우지 않는다.
 3. 관련성이 인정된 R&D 및 지정 연구기관 특례를 적용한다.
-4. 그 밖의 사업은 핵심 기능과 주목적으로 분류하되, 7·8·4의 포함 조건이 겹치면 7 > 8 > 4를 적용한다.
+4. 그 밖의 사업은 현재 직접 수행하는 활동·산출물과 핵심 기능으로 분류한다. 장래 활용처·기대효과보다 현재 수행 단계를 우선하며, 그 활동에서 7·8·4의 포함 조건이 겹치면 7 > 8 > 4를 적용한다.
 5. 포함 근거가 없을 때만 일반 제외조건을 검토한다. 증거가 제한적이면 숫자 분류를 수행하고 review_needed=true 및 review_reason에 부족한 정보를 기록한다.
 
 예외가 있는지 확인하기 전에 0으로 조기 종료하지 않는다.
@@ -227,9 +233,29 @@ R&D라는 이유만으로 관련성을 인정하지 않는다.
 지정 연구기관 목록에 없다는 사실은 2의 기관 특례를 적용할 수 없다는 뜻이지, 다른 카테고리까지 모두 제외한다는 뜻이 아니다.
 기관명에서 기능이 확인되지 않거나 목적과 충돌하면 기능을 만들어내지 말고 근거 부족으로 구별한다.
 
+### D. 생태·자연자원 관련 기관 목록
+
+* 국립자연휴양림관리소 → 산림자원 관리·지속가능한 이용 관련 기관, 9.
+
+사업명·상위사업명·회계명·계정명에 해당 기관이 명시되면 생태·자연자원 관련성의 단서로 사용한다.
+해당 기관의 인건비·기본경비·운영비 및 해당 기능을 지원하는 손익계정·자본계정 전출은 9다.
+'생태'·'생물다양성'이라는 단어가 없거나 경상경비·전출이라는 이유만으로 제외하지 않는다.
+이 기관은 B의 연구기관 2 특례 목록이 아니다. 다른 기관이나 별개의 사업에 자동 확대하지 않는다.
+
 ## STEP 4. 사업의 '기능'을 판정
 
-관련성이 인정되면 사업명에 포함된 명사보다 실제 수행하는 동작을 찾는다.
+관련성이 인정되면 사업명에 포함된 명사보다 현재 직접 수행하는 동작과 대상을 찾는다.
+
+### 여러 키워드가 연결될 때: 현재 수행 단계 우선
+
+여러 키워드가 하나의 추진 과정으로 연결되면 현재 사업의 예산으로 직접 수행하는 활동·산출물을 먼저 분류한다.
+장래 활용처·기대효과·최종 목적은 보조 정보다. 후속 단계의 키워드로 현재 활동의 카테고리를 바꾸지 않는다.
+'현재와 가장 가까운 단계'는 문장에서 먼저 등장한 단어나 계약·인건비 지급 같은 일반 행정절차가 아니라 분류 대상 사업이 직접 제공하는 실질적 활동·산출물이다.
+입력에 수행 단계가 없으면 시간 순서나 미확인 활동을 만들어내지 않는다. 확인 가능한 활동으로 분류하고 필요한 경우 별도 검토 표시를 남긴다.
+- 바이오매스 에너지 활용을 위한 숲 조성·산림자원 조성이 현재 활동이면 9다. 장래 에너지 활용이라는 이유로 4로 바꾸지 않는다. 보호지역 관리·훼손 생태계 복원이 명시되면 기존 7·8 규칙을 먼저 확인한다.
+- 현재 활동이 바이오매스 에너지 이용 설비 구축이면 기존 에너지 포함 규칙에 따라 4다.
+- 관련성이 인정된 바이오매스 기술개발 R&D는 기존 특례에 따라 2다.
+경상경비는 지급 행위가 아닌 기관 핵심 기능으로 판단하는 기존 규칙을 유지한다.
 
 다음 질문 중 가장 잘 맞는 하나를 선택한다.
 
@@ -366,11 +392,20 @@ GMO/LMO 안전관리 → 3
 R&D·지정 연구기관 특례 적용 후, 실제 포함 조건이 겹치는 경우 7 > 8 > 4 순으로 판단한다.
 1. 보호지역 지정·관리, 보호지역 밖 보전, OECM, 야생종 보전 등 7의 조건이 확인되면 7이다. 보전·관리의 일부인 복원도 7을 우선한다.
 2. 7에 해당하지 않고 생태계·서식지의 복원·재생·훼손지 회복이 명시된 경우에만 8이다.
-3. 7·8에 해당하지 않는 공원·정원 조성·관리, 도시 그린인프라, 생태관광은 4다.
+3. 7·8에 해당하지 않는 일반 조성·관리는 아래 도시숲·공원·정원의 9 vs 4 운영 기준을 적용한다. 그 밖의 도시 그린인프라·생태관광은 실제 활동이 녹색 전환이면 4다.
 '보호', '공원', '조성'이라는 단어만으로 법적 보호지역이나 훼손 상태를 추정하지 않는다.
 '위해성 저감'·'오염부지의 공원화'만으로 생태계 복원을 추정하지 않는다.
-용산공원조성 및 위해성 저감사업은 오염부지의 공원화로 4다.
+용산공원조성 및 위해성 저감사업도 사업명만으로 4에 고정하지 않는다. 현재 직접 수행하는 활동이 일반 공원 조성·관리이면 9, 오염 자체의 정화·처리이면 6이며, 보호지역 관리·실제 생태계 복원이 확인되면 기존 7·8 규칙을 적용한다.
 일반 시설 유지관리는 시설의 실제 기능으로 판단한다. 지정 수목원·연구기관은 2 특례를 유지한다.
+
+## 9 vs 4: 도시숲·공원·정원 조성·관리
+
+이 분류의 운영 기준으로 도시숲을 포함하여 그보다 작은 단위로 취급하는 공원 등의 일반 조성·관리는 9다.
+도시숲보다 큰 단위로 취급하는 정원 등의 일반 조성·관리는 4다.
+이는 대상별 운영 구분이며 명칭만으로 실제 면적의 대소를 추정하는 규칙이 아니다. 미확인 면적·규모를 만들어내지 않는다.
+도시숲·공원은 9, 정원은 4라는 기본 구분을 적용하되 입력의 대상이 불명확하면 별도 검토 표시를 남긴다.
+국립공원 등 보호지역 지정·관리는 7, 실제 훼손 생태계 복원은 기존 7·8 규칙, 지정 수목원·연구기관 및 관련 R&D는 기존 2 특례를 우선한다.
+'공원'이라는 단어만으로 보호지역 7을 적용하거나 '정원'이라는 단어만으로 지정 연구기관 2 특례를 무시하지 않는다.
 
 ## 5 vs 9 vs 0: 제도·기금과 지속가능 이용
 
@@ -385,9 +420,9 @@ R&D·지정 연구기관 특례 적용 후, 실제 포함 조건이 겹치는 �
 
 ## 8 vs 9
 
-훼손된 생태계·서식지를 회복시키는 것이 주목적 → 8
+현재 직접 수행하는 활동이 훼손된 생태계·서식지 회복 → 8
 
-생산·이용을 계속하면서 자원을 지속가능하게 관리하는 것이 주목적 → 9
+현재 직접 수행하는 활동이 생산·이용을 계속하면서 자원을 지속가능하게 관리 → 9
 
 예:
 산림복원 → 8
@@ -415,12 +450,12 @@ TAC·감척·자율관리어업 → 9
 
 1. 생물다양성 관련 하위 요소를 찾는다.
 2. 관련 근거가 명시된 내역사업을 찾아 reason에 그 요소를 특정한다. 자료가 부족해도 다른 입력의 기능을 검토해 숫자를 선택하고 별도 검토 표시를 남긴다. 실제 무관 활동만 확인되면 0이다.
-3. 여러 요소는 주목적, 생물다양성 근거가 명시된 요소, 확인 가능한 예산 비중 순으로 판단한다.
-4. 7·8·4의 포함 조건이 겹치면 일반 주목적·예산 비중 규칙보다 7 > 8 > 4를 우선한다.
+3. 현재 직접 수행하는 활동과 장래 활용처·기대효과를 구별하고 현재 활동을 우선한다. 독립적인 현재 활동이 여러 개면 생물다양성 근거가 명시된 활동과 확인 가능한 예산 비중으로 판단한다.
+4. 현재 활동에서 7·8·4의 포함 조건이 겹치면 일반 예산 비중 규칙보다 7 > 8 > 4를 우선한다. 일반 도시숲·공원·정원 조성·관리는 별도의 9 vs 4 운영 기준을 따른다.
 5. 입력에 없는 예산 비중이나 사업 중요도를 추정하지 않는다.
 6. 항상 하나의 숫자 카테고리를 선택하고, 근거 부족 여부는 별도 review_needed와 review_reason에 기록한다.
 
-목표와 수단을 구별한다. 수변녹지 조성의 명시적 최종 목표가 비점오염 저감·수질개선이면 6,
+현재 활동과 장래 효과를 구별한다. 수변녹지 사업이 현재 직접 수행하는 활동 자체가 비점오염 처리·저감 기능의 시설 설치·운영이면 6이다. 장래 수질개선 효과만으로 일반 녹지 조성을 6으로 바꾸지 않는다.
 훼손된 생태계·서식지의 회복이 명시되면 7 해당 여부를 먼저 확인한 뒤 8로 판단한다. '조성'이라는 표현만으로 훼손 상태를 추정하지 않는다.
 생태관광 시설·서비스의 녹색 전환은 4, 농림어업 자원의 지속가능한 생산·관리는 9로 구별한다.
 환경교육은 생물다양성·자연체험 내용이 확인되면 2다. 일반 환경교육이라는 이름만으로 포함 또는 제외를 단정하지 않는다.
@@ -429,8 +464,8 @@ TAC·감척·자율관리어업 → 9
 
 판단에는 다음 순서로 정보를 사용한다.
 
-1. 사업설명자료의 사업 목적
-2. 구체적인 수행 활동
+1. 사업설명자료·사업명에서 확인되는 현재의 구체적인 수행 활동·대상·산출물
+2. 사업설명자료의 사업 목적(장래 활용처·기대효과는 현재 활동을 보조)
 3. 법적 근거
 4. 세부사업명
 5. 단위사업명
@@ -443,7 +478,7 @@ TAC·감척·자율관리어업 → 9
 입력에 존재하지 않는 목적·활동·기관 기능을 만들어내지 않는다.
 
 
-## KEI ①~④ 검토 반영: 포함 근거 우선·목적 기반 판정
+## KEI ①~④ 검토 반영: 포함 근거와 현재 수행 활동 우선
 
 이 보완 규칙은 위 일반 제외조건과 충돌할 때 구체적인 인정 활동에 우선 적용한다. 단, 실제 입력에 없는 내역사업·예산비중·활동을 추정하지 않는다. 사업설명자료는 사업목적 및 경계가 확인된 법적 근거만 사용하며 세부 내역사업 추출을 요구하지 않는다.
 
@@ -453,11 +488,11 @@ TAC·감척·자율관리어업 → 9
 - 산림자원 조사·임업통계·자연자원 DB는 2, 농지·해양의 공간계획 지원 정보는 5, 폐기물·오염물질 관리 정보시스템은 6이다. 정보화·통계라는 형식만으로 0으로 분류하지 않는다.
 - 하수관로 정비·저류·누출 방지·하수처리시설 및 해당 시설의 BTL 임대료·운영비 등은 하수 오염 예방·처리 기능이 확인되면 6이다. 상수 공급 인프라나 일반 치수와 혼동하지 않는다. 광해에 따른 토양·수질 오염 예방·복구, 폐기물 수거·선별·처리, 상수원 수질보전, 화학물질·유해폐기물 관리체계 및 그 국제협력도 6을 검토한다.
 - 방사성폐기물 관련 활동은 핵연료주기 기술개발 자체와 방사능 오염의 측정·예방·처리·환경방호를 구별한다. 오염관리 목적이 실제 입력에서 확인되면 6, 그 관련 R&D면 2를 검토하되 일반 원자력 기술개발까지 자동 포함하지 않는다.
-- 대기 분야의 단순 미세먼지·배출가스 감시·저감은 0 원칙을 유지한다. 다만 사업목적에 기후·생태계 변화유발물질의 측정 등 생태계 관련 관리 대상·목적이 명확하면 6을 검토한다. 법령의 포괄적 정의만으로 실제 활동을 만들어내지 않는다. 도시숲 조성, 선박평형수의 유해수생생물 유입 방지, 실제 친환경 선박 전환 등 독립적으로 인정되는 활동은 대기 제외규칙을 사업 전체에 일괄 적용하지 않고 각각 4·3 등 적절한 카테고리로 판단한다. 단순 미세먼지 성능평가 기반을 선박 교체사업으로 확대 해석하지 않는다.
+- 대기 분야의 단순 미세먼지·배출가스 감시·저감은 0 원칙을 유지한다. 다만 사업목적에 기후·생태계 변화유발물질의 측정 등 생태계 관련 관리 대상·목적이 명확하면 6을 검토한다. 법령의 포괄적 정의만으로 실제 활동을 만들어내지 않는다. 도시숲 조성, 선박평형수의 유해수생생물 유입 방지, 실제 친환경 선박 전환 등 독립적으로 인정되는 활동은 대기 제외규칙을 사업 전체에 일괄 적용하지 않고 각각 9·3·4로 판단한다. 단순 미세먼지 성능평가 기반을 선박 교체사업으로 확대 해석하지 않는다.
 - 관련성이 확인된 R&D는 다른 기능 카테고리보다 2를 우선한다. LMO 안전관리 등 3의 활동이 포함된 R&D라도 해당 활동이 사업목적에서 확인되면 2 특례를 우선 검토한다. 일반 산업 R&D, 연구실 안전, 바이오·에너지 R&D라는 명칭만으로 관련성을 인정하지 않는다. 산업화 목적이 병존해도 생물자원 지속가능 이용·오염관리·바이오 기반 에너지 등 인정 활동이 명확하면 제외하지 않는다.
 - 지침이 인정한 재생에너지 이용·소비 전환의 금융·융자·보증·발전차액지원 및 농림수산업 연계 에너지 효율화·전환 설비는 4를 검토한다. 단순 에너지 산업 기술·인프라와 구별한다.
 - 사업목적에 관련 활동과 무관 활동이 함께 있으면 확인된 관련 활동을 빠뜨리지 않는다. 다만 제공되지 않은 내역사업, 비용 일부, 추진 세부내용을 KEI 사례로부터 추정해 새로운 입력 사실처럼 사용하지 않는다. 포함 활동이 사업목적·메타데이터·법적 근거에 확인되지 않으면 잠정 0과 검토 표시를 사용한다.
-- reason에는 해당 사업의 실제 입력 문구, 우선 적용한 포함·제외 규칙, 배제한 경쟁 카테고리를 기록한다. '인간 건강', '행정비', '산업지원', '시설', '금융', '대기'라는 포괄적 사유만으로 구체적인 포함 규칙을 뒤집지 않는다.
+- reason에는 현재 직접 수행하는 활동의 실제 입력 문구, 적용한 포함·제외 규칙, 배제한 경쟁 카테고리를 기록한다. 장래 목적의 키워드가 함께 있으면 그것을 우선하지 않은 이유를 간결히 설명한다. '인간 건강', '행정비', '산업지원', '시설', '금융', '대기'라는 포괄적 사유만으로 구체적인 포함 규칙을 뒤집지 않는다.
 
 # 최종 자기검증
 
@@ -474,6 +509,8 @@ TAC·감척·자율관리어업 → 9
 9. 운영비·융자·시설 설치라는 형식 대신 기관 기능·지원 조건·시설 용도를 확인했는가?
 10. 나머지 입력과 포함 규칙을 충분히 검토해 숫자를 부여했으며, 자료 부족에 따른 잠정 판단은 별도 검토 표시로 구분했는가?
 11. 7 > 8 > 4와 대기 분야의 생물다양성 목적 요건을 적용했는가?
+12. 장래 목적·활용처가 현재 직접 수행하는 활동의 분류를 덮어쓰지 않았는가?
+13. 국립자연휴양림관리소의 기관 기능 9와 도시숲·공원 9 / 정원 4 운영 기준을 기존 특례와 함께 적용했는가?
 
 위 검증 후 최종 카테고리를 결정한다.
 
@@ -597,6 +634,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audit-csv", type=Path, default=None)
     parser.add_argument("--review-csv", type=Path, default=None)
     parser.add_argument("--label-col", default=DEFAULT_LABEL_COLUMN)
+    parser.add_argument(
+        "--target-ministries", nargs=11, default=TARGET_MINISTRIES,
+        help="LLM으로 분류할 소관명 11개. 나머지 소관기관은 LLM 호출 없이 0 처리",
+    )
     parser.add_argument(
         "--gold-label-col",
         default=None,
@@ -1244,12 +1285,73 @@ def evaluate_predictions(
     return metrics
 
 
+LOCAL_TARGET_FIELDS = (
+    "농림해양수산", "문화및관광", "산업ㆍ중소기업및에너지", "일반공공행정",
+    "환경", "국토및지역개발", "보건",
+)
+
+
+def normalize_field(value: str) -> str:
+    return "".join(clean_cell(value).split()).replace("ㆍ", "·")
+
+
+def detect_fiscal_type(headers: list[str], rows: list[dict[str, str]]) -> str:
+    local_columns = {"지방자치단체코드", "시도코드", "시도명"}.intersection(headers)
+    if local_columns:
+        if not rows or all(any(clean_cell(row.get(c)) for c in local_columns) for row in rows):
+            return "local"
+        raise ValueError("지방 식별 열에 값이 없는 행이 있습니다. 중앙·지방 혼합 또는 누락 데이터를 확인하세요.")
+    if {"소관명", "분야명"}.issubset(headers):
+        return "central"
+    raise ValueError("중앙·지방 자동 판별에 필요한 열이 없습니다.")
+
+
+def filter_rule(args: argparse.Namespace) -> tuple[str, frozenset[str]]:
+    if getattr(args, "fiscal_type", "central") == "local":
+        return "분야명", frozenset(normalize_field(value) for value in LOCAL_TARGET_FIELDS)
+    return "소관명", frozenset(clean_cell(value) for value in getattr(args, "target_ministries", TARGET_MINISTRIES))
+
+
+def filter_value(row: dict[str, str], column: str) -> str:
+    return normalize_field(row.get(column, "")) if column == "분야명" else clean_cell(row.get(column))
+
+
+def prepare_ministry_labels(
+    items: dict[str, dict[str, Any]],
+    cache: dict[str, dict[str, Any]],
+    args: argparse.Namespace,
+) -> dict[str, dict[str, Any]]:
+    column, targets = filter_rule(args)
+    selected = []
+    for key_hash, item in items.items():
+        field = filter_value(item["row"], column)
+        if field in targets:
+            # 과거 정책 결과는 LLM 캐시로 재사용하지 않는다.
+            if cache.get(key_hash, {}).get("model") in {"ministry-filter", "field-filter"}:
+                cache.pop(key_hash)
+            selected.append((key_hash, item))
+        else:
+            # --limit-keys 및 기존 캐시와 무관하게 모든 비대상 행을 0으로 고정.
+            cache[key_hash] = {
+                "key_hash": key_hash, "label": 0, "classification_status": "무관",
+                "review_needed": False, "review_reason": "", "검토필요": "",
+                "confidence": "1.000", "reason": f"{column} 필터: '{field}'은 LLM 대상 {len(targets)}개 목록 밖이므로 정책상 0 부여(LLM 미호출).",
+                "evidence": "[]", "model": "ministry-filter", "prompt_version": PROMPT_VERSION,
+                "input_text": item["input_text"], "document_status": "DISABLED",
+                "document_path": "", "document_chars": 0, "raw_response": "",
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+    print(f"{column} 필터: LLM 대상 {len(selected):,}개 / 자동 0 {len(items) - len(selected):,}개")
+    return dict(selected)
+
+
 def classify_items(
     items: dict[str, dict[str, Any]],
     cache: dict[str, dict[str, Any]],
     args: argparse.Namespace,
 ) -> None:
-    selected = list(items.items())
+    started_at = getattr(args, "started_at", time.monotonic())
+    selected = list(prepare_ministry_labels(items, cache, args).items())
     if args.limit_keys > 0:
         selected = selected[: args.limit_keys]
     pending = [
@@ -1287,7 +1389,11 @@ def classify_items(
         with lock:
             cache[key_hash] = record
             completed += 1
+            elapsed = max(0, int(time.monotonic() - started_at))
+            hours, remainder = divmod(elapsed, 3600)
+            minutes, seconds = divmod(remainder, 60)
             print(
+                f"[경과 {hours:02d}:{minutes:02d}:{seconds:02d}] "
                 f"[{completed:,}/{len(pending):,}] "
                 f"label={record['label']} conf={record['confidence']} "
                 f"{item['input_text'][:70]}"
@@ -1320,6 +1426,7 @@ def write_outputs(
     items: dict[str, dict[str, Any]],
     cache: dict[str, dict[str, Any]],
     args: argparse.Namespace,
+    *, preliminary: bool = False,
 ) -> None:
     excluded = {args.label_col, *EXTRA_OUTPUT_COLUMNS}
     output_headers = [
@@ -1339,6 +1446,8 @@ def write_outputs(
             result[column] = cached.get(column, "")
         output_rows.append(result)
     write_csv(args.output_file, output_headers, output_rows)
+    if preliminary:
+        return
     evaluation = evaluate_predictions(
         output_rows,
         args.gold_label_col,
@@ -1396,6 +1505,14 @@ def write_outputs(
         "prompt_version": PROMPT_VERSION,
         "input_file": str(args.input_file),
         "input_rows": len(rows),
+        "fiscal_type": getattr(args, "fiscal_type", "central"),
+        "filter_column": filter_rule(args)[0],
+        "target_local_fields": list(LOCAL_TARGET_FIELDS),
+        "target_ministries": list(getattr(args, "target_ministries", TARGET_MINISTRIES)),
+        "ministry_filter_zero_rows": sum(
+            cache.get(hash_key(build_key(row)), {}).get("model") == "ministry-filter"
+            for row in rows
+        ),
         "unique_businesses": len(items),
         "label_counts_in_cache": dict(sorted(counts.items())),
         "classification_status_counts": dict(Counter(
@@ -1414,7 +1531,12 @@ def write_outputs(
 
 
 def main() -> int:
+    started_at = time.monotonic()
     args = parse_args()
+    args.started_at = started_at
+    args.target_ministries = tuple(clean_cell(field) for field in args.target_ministries)
+    if len(set(args.target_ministries)) != 11 or any(not field for field in args.target_ministries):
+        raise ValueError("LLM 대상 소관명 11개를 TARGET_MINISTRIES 또는 --target-ministries로 지정하세요(중복·빈 값 불가).")
     if args.max_document_chars < 1:
         raise ValueError("--max-document-chars는 1 이상이어야 합니다.")
     if args.max_tokens < 1:
@@ -1423,6 +1545,20 @@ def main() -> int:
         print("안내: --num-ctx는 vLLM에 적용되지 않습니다. 문맥 한도는 서버 설정을 따릅니다.")
     set_default_paths(args)
     headers, rows, encoding = read_csv(args.input_file)
+    args.fiscal_type = detect_fiscal_type(headers, rows)
+    filter_column, filter_targets = filter_rule(args)
+    print(f"재정 유형 자동 판별: {args.fiscal_type} / {filter_column} 기준 {len(filter_targets)}개 대상")
+    if filter_column not in headers or any(not filter_value(row, filter_column) for row in rows):
+        raise ValueError(f"필터 기준 {filter_column} 값이 누락된 행이 있습니다.")
+    if "소관명" not in headers or any(not clean_cell(row.get("소관명")) for row in rows):
+        raise ValueError("소관명 컬럼과 모든 행의 소관명이 필요합니다. 누락값을 자동 0으로 처리하지 않습니다.")
+    # business_key가 서로 다른 소관기관에 중복되면 캐시/출력에서 분류가 섞일 수 있다.
+    key_ministries: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        key, field = build_key(row), (clean_cell(row["소관명"]), filter_value(row, filter_column))
+        if key in key_ministries and key_ministries[key] != field:
+            raise ValueError(f"서로 다른 소관기관에서 같은 사업 키가 발견되었습니다: {key}")
+        key_ministries[key] = field
     args.gold_label_col = resolve_gold_label_column(headers, args.gold_label_col)
     print(f"평가용 정답 컬럼: {args.gold_label_col}")
     missing = [column for column in KEY_COLUMNS if column not in headers]
@@ -1432,15 +1568,28 @@ def main() -> int:
     items = collect_items(rows)
     print(f"입력: {args.input_file} ({len(rows):,}행, {encoding})")
     print(f"고유 사업: {len(items):,}개")
-    print_document_match_summary(rows, args)
+    target_rows = [row for row in rows if filter_value(row, filter_column) in filter_targets]
+    print(f"전체 {len(rows):,}행 / LLM 대상 {len(target_rows):,}행 / 자동 0 {len(rows) - len(target_rows):,}행")
     if args.dry_run:
+        print_document_match_summary(target_rows, args)
         print("--dry-run: VLLM 호출 및 파일 저장 없이 종료합니다.")
         return 0
 
     cache = load_cache(args.cache_csv)
+    cache = {key: record for key, record in cache.items() if key in items}
     print(f"기존 캐시: {len(cache):,}개")
-    classify_items(items, cache, args)
-    write_outputs(headers, rows, items, cache, args)
+    # Resolve non-target labels and persist the full-row snapshot BEFORE document checks/API calls.
+    llm_items = prepare_ministry_labels(items, cache, args)
+    zero_results = {key: cache[key] for key in items if key not in llm_items}
+    llm_cache = {key: record for key, record in cache.items() if key in llm_items}
+    # Do not rewrite thousands of deterministic zeros after every model response.
+    save_cache(args.cache_csv, llm_cache)
+    write_outputs(headers, rows, items, {**zero_results, **llm_cache}, args, preliminary=True)
+    print(f"자동 0 사전 저장 완료: {len(zero_results):,}개 사업 / {args.output_file}", flush=True)
+    try:
+        classify_items(llm_items, llm_cache, args)
+    finally:
+        write_outputs(headers, rows, items, {**zero_results, **llm_cache}, args)
     return 0
 
 
