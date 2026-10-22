@@ -47,7 +47,7 @@ TARGET_MINISTRIES: tuple[str, ...] = (
 )
 DEFAULT_LABEL_COLUMN = "LLM BIOFIN 1차 카테고리"
 DEFAULT_GOLD_LABEL_COLUMN = "BIOFIN 1차 카테고리"
-PROMPT_VERSION = "kr-biofin-category-2026-10-21-v10-current-activity-vllm-v1"
+PROMPT_VERSION = "kr-biofin-category-2026-10-22-v11-rnd-consistency-vllm-v1"
 VALID_LABELS = set(range(10))
 ENCODINGS = ("utf-8-sig", "cp949", "utf-8")
 
@@ -441,7 +441,7 @@ TAC·감척·자율관리어업 → 9
 본문이 없으면 사업명·회계(기금)명·계정명·기관 목록에서 명시적 포함 조건을 먼저 찾는다.
 메타데이터로 포함 또는 제외를 판정할 수 있으면 해당 결과를 선택한다.
 분류를 유보하지 말고 가장 근거가 있는 0~9 숫자를 반환한다. 포함 근거가 끝까지 없으면 잠정 0을 부여하고 review_needed=true를 기록한다.
-잠정 0의 reason은 '잠정 분류: 포함 근거 미확인'으로 시작한다. review_reason에는 확인되지 않은 대상·활동·조건을 150자 이내로 기록한다.
+review_reason에는 확인되지 않은 대상·활동·조건을 150자 이내로 기록한다.
 입력에 없는 목적·활동을 만들어 1~9를 부여하지 않는다. 분류 결과와 근거의 불확실성을 별도 필드로 구분한다.
 
 # 혼합사업
@@ -537,7 +537,7 @@ reason에는 다음을 포함한다.
 * 적용한 포함 또는 제외 기준
 * 가장 혼동될 수 있는 경쟁 카테고리와 그것을 배제한 이유
 
-실제 제외 근거가 있는 0의 reason은 '명시적 제외'로 시작한다. 포함 근거 미확인으로 잠정 0을 선택했으면 '잠정 분류: 포함 근거 미확인'으로 시작하고 review_needed=true를 반환한다.
+reason은 '명시적 제외:', '잠정 분류:' 같은 머리말 없이 판정 근거 본문만 쓴다. 포함 근거 미확인으로 잠정 0을 선택했으면 review_needed=true를 반환한다.
 검토 여부는 숫자 레이블을 대체하지 않는다. 판단 과정을 반복해 쓰지 말고 최종 결론과 필요한 근거만 기록한다.
 reason은 핵심 활동, 적용 규칙, 경쟁 분류 배제 이유 순으로 300자 이내로 간결하게 작성한다.
 "지침에서 제외한다"고 쓸 때는 위 프롬프트에 실제로 있는 제외조건만 인용한다.
@@ -584,7 +584,84 @@ PROMPT_TEMPLATE = """\
 label은 반드시 0~9 정수다. classification_status는 '관련'(1~9) 또는 '무관'(0)이다. review_needed는 true/false, review_reason은 별도 검토 사유다. confidence는 0.0부터 1.0까지다.
 """
 
+
+REASON_PREFIX_RE = re.compile(r"^\s*(?:명시적\s*제외\s*[:：]|잠정\s*분류\s*[:：](?:\s*포함\s*근거\s*미확인\s*[.:：]?)?)\s*")
+
+
+def strip_reason_prefix(reason: str) -> str:
+    """Drop status headers such as '명시적 제외:' so reason holds only the model's rationale."""
+    return REASON_PREFIX_RE.sub("", str(reason or ""), count=1)
+
+
+# Keep the first model answer separate from the rule-adjusted final result.
+PROVENANCE_FIELDS = ("model_original_label", "model_original_reason",
+                     "model_original_response", "rule_adjustment_reason",
+                     "consistency_check", "consistency_response")
+
+
+def explicit_reason_labels(reason: str) -> set[int]:
+    """Only explicit conclusions, never arbitrary category numbers in prose."""
+    patterns = (
+        r"(?:최종\s*(?:label|레이블|분류)|label|레이블)\s*(?:은|는|:|=)\s*([0-9])",
+        r"([0-9])(?:번)?(?:을|를)\s*(?:최종적으로\s*)?적용(?:한다|합니다)",
+        r"([0-9])(?:번)?(?:으로|로)\s*최종\s*분류",
+    )
+    return {int(m.group(1)) for p in patterns for m in re.finditer(p, reason, re.I)}
+
+
+def enforce_result_consistency(result: dict[str, Any], row: dict[str, str],
+                               prompt: str, args: argparse.Namespace) -> dict[str, Any]:
+    original = dict(result)
+    original_data = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", result["raw_response"].strip())) if result["raw_response"].strip().startswith("{") else {}
+    reason = str(original_data.get("reason", result["reason"]))
+    # Use the business title only; parent programs and quoted documents may mention unrelated R&D.
+    is_rnd = bool(re.search(r"[（(]\s*R\s*&\s*D\s*[)）]", clean_cell(row.get("세부사업명")), re.I))
+    target = 2 if is_rnd and result["label"] != 0 else result["label"]
+    adjustment = "관련 사업으로 판단된 명시적 R&D에 2 우선 규칙 적용" if target != result["label"] else ""
+    conclusions = explicit_reason_labels(reason)
+    conflict = bool(conclusions - {target})
+    result.update({"model_original_label": original["label"], "model_original_reason": reason,
+                   "model_original_response": original["raw_response"],
+                   "rule_adjustment_reason": adjustment, "consistency_check": "통과",
+                   "consistency_response": ""})
+    if not adjustment and not conflict:
+        return result
+    # One targeted recheck, independent of HTTP retries. Never change relevance based on a number in reason.
+    final_label = target
+    correction = ("\n\n[최종 일관성 검증]\n관련 R&D는 다른 기능보다 2를 우선한다. "
+                  f"코드가 확정한 label={final_label}을 유지하고 classification_status를 맞춰라. "
+                  "최초 답변의 모순을 해소하고 실제 입력에 근거한 최종 이유만 2문장 이내로 작성하라. "
+                  "원래 출력 형식의 완전한 JSON을 반환하라. 다른 레이블로 결론을 번복하지 마라.\n"
+                  + json.dumps({"previous_label": original["label"], "previous_reason": reason}, ensure_ascii=False))
+    try:
+        raw = call_vllm(prompt + correction, args)
+        result["consistency_response"] = raw
+        checked = parse_jsonish_response(raw)
+        full_reason = str(json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())).get("reason", ""))
+        if checked["label"] != final_label or explicit_reason_labels(full_reason) - {final_label}:
+            raise ValueError("재검증 응답의 레이블·근거 모순 지속")
+        for field in ("reason", "evidence", "confidence"):
+            result[field] = checked[field]
+        result["review_needed"] = original["review_needed"] or checked["review_needed"]
+        result["review_reason"] = "; ".join(filter(None, [original["review_reason"], checked["review_reason"]]))
+        result["consistency_check"] = "재검증 통과"
+    except (ValueError, OSError, TimeoutError, RemoteDisconnected) as exc:
+        if isinstance(exc, VLLMResponseError):
+            result["consistency_response"] = exc.raw_response
+        result["consistency_check"] = "재검증 미해결"
+        result["review_needed"] = True
+        result["review_reason"] = (original["review_reason"] + "; 근거 재검증 필요: " + str(exc))[:500]
+        result["reason"] = ("모델이 관련으로 판단한 R&D 사업에 코드의 2 우선 규칙을 적용함. 상세 근거 재검증 필요."
+                            if adjustment else "최초 모델의 숫자 분류를 유지했으나 근거와의 모순을 해결하지 못함. 별도 검토 필요.")
+        result["confidence"] = 0.0
+    result["label"] = final_label
+    result["classification_status"] = "무관" if final_label == 0 else "관련"
+    result["검토필요"] = "검토 필요" if result["review_needed"] else ""
+    return result
+
+
 CACHE_FIELDS = (
+    *PROVENANCE_FIELDS,
     "key_hash",
     "label",
     "classification_status",
@@ -613,6 +690,7 @@ EXCLUDED_CSV_COLUMNS = frozenset({
     "document_chars",
 })
 EXTRA_OUTPUT_COLUMNS = (
+    *PROVENANCE_FIELDS,
     "classification_status",
     "confidence", "reason", "evidence",
     "document_status", "document_path", "document_chars",
@@ -927,7 +1005,7 @@ def parse_jsonish_response(text: str) -> dict[str, Any]:
         "label": label,
         "classification_status": status,
         "confidence": max(0.0, min(1.0, confidence)),
-        "reason": clean_cell(data.get("reason"))[:500],
+        "reason": strip_reason_prefix(clean_cell(data.get("reason")))[:500],
         "evidence": clean_cell(data.get("evidence"))[:500],
         "review_needed": review_needed,
         "review_reason": review_reason,
@@ -1002,7 +1080,7 @@ def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
     document_text, document_status, document_path, document_chars = (
         load_document_for_prompt(row, args)
     )
-    prompt = build_prompt(row, document_text)
+    prompt = build_prompt(row, document_text) + "\n관련성이 인정된 R&D는 최종 label=2를 우선한다. reason은 최종 label과 일치하는 근거만 2문장 이내로 작성한다. 다른 카테고리를 비교하더라도 최종 결론을 번복하지 않는다."
     last_error: Exception | None = None
     raw_response = ""
     for attempt in range(args.retries + 1):
@@ -1010,6 +1088,7 @@ def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
             raw_response = ""
             raw_response = call_vllm(prompt, args)
             result = parse_jsonish_response(raw_response)
+            result = enforce_result_consistency(result, row, prompt, args)
             result.update(
                 {
                     "document_status": document_status,
@@ -1335,7 +1414,7 @@ def prepare_ministry_labels(
             cache[key_hash] = {
                 "key_hash": key_hash, "label": 0, "classification_status": "무관",
                 "review_needed": False, "review_reason": "", "검토필요": "",
-                "confidence": "1.000", "reason": f"{column} 필터: '{field}'은 LLM 대상 {len(targets)}개 목록 밖이므로 정책상 0 부여(LLM 미호출).",
+                "confidence": "1.000", "reason": "",  # LLM 미호출 행은 모델 근거가 없으므로 비워 둔다.
                 "evidence": "[]", "model": "ministry-filter", "prompt_version": PROMPT_VERSION,
                 "input_text": item["input_text"], "document_status": "DISABLED",
                 "document_path": "", "document_chars": 0, "raw_response": "",
@@ -1386,6 +1465,7 @@ def classify_items(
             "raw_response": result["raw_response"],
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
+        record.update({field: result.get(field, "") for field in PROVENANCE_FIELDS})
         with lock:
             cache[key_hash] = record
             completed += 1
@@ -1468,7 +1548,7 @@ def write_outputs(
             "review_reason": cached.get("review_reason", ""),
             "검토필요": cached.get("검토필요", ""),
             "confidence": cached.get("confidence", ""),
-            "reason": cached.get("reason", ""),
+            "reason": strip_reason_prefix(cached.get("reason", "")),
             "evidence": cached.get("evidence", ""),
             "input_text": item["input_text"],
             "document_status": cached.get("document_status", ""),
@@ -1476,6 +1556,7 @@ def write_outputs(
             "document_chars": cached.get("document_chars", ""),
             "raw_response": cached.get("raw_response", ""),
         }
+        audit.update({field: cached.get(field, "") for field in PROVENANCE_FIELDS})
         audit_rows.append(audit)
         try:
             confidence = float(audit["confidence"])
@@ -1487,6 +1568,7 @@ def write_outputs(
             review_rows.append(audit)
 
     audit_headers = [
+        *PROVENANCE_FIELDS,
         "key_hash", "row_count", "label", "classification_status", "confidence",
         "reason", "evidence", "input_text", "document_status",
         "document_path", "document_chars", "raw_response",

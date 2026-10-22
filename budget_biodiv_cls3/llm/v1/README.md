@@ -98,3 +98,12 @@ python llm/v1/classify_biofin_category_with_ollama.py `
 `thinking`만 반환되더라도 이를 최종 예측으로 사용하지 않습니다.
 서버·모델 변경 후에는 `--limit-keys 1 --workers 1 --retries 0`으로 먼저 검증합니다.
 다른 모델을 비교할 때는 출력·캐시 폴더를 분리합니다.
+
+
+## 2026-10-22 vLLM v11: R&D 및 근거 일관성
+
+모델이 관련(1~9)으로 판단하고 세부사업명에 `(R&D)`가 명시된 사업은 최종 레이블 2를 적용합니다. 무관(0)을 R&D 명칭만으로 2로 변경하지 않습니다. 보정 또는 명시적인 근거 결론 충돌이 있으면 추가 API 요청을 최대 1회 수행해 확정 레이블의 근거를 다시 작성합니다. 실패하면 숫자 레이블을 유지하고 검토 필요로 표시합니다. 일반 자연어 모순 전체를 탐지하는 기능은 아니며, 임의의 숫자 언급을 레이블로 사용하지 않습니다.
+
+`model_original_label`, `model_original_reason`, `model_original_response`에 최초 모델 응답을, `rule_adjustment_reason`, `consistency_check`, `consistency_response`에 보정·재검증 내역을 저장합니다. 최종 label과 reason은 검증 후 값입니다. 캐시·결과 CSV·감사 CSV 모두 이 필드를 보존합니다.
+
+프롬프트 버전이 v11로 변경되어 기존 버전 캐시는 재사용되지 않습니다. 새 결과 폴더로 실행하십시오. 기존 결과 파일은 자동 수정하지 않습니다. 원자력·대기 포함/제외 판단 자체는 이번 변경에서 자동 보정하지 않습니다.
