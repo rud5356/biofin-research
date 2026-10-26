@@ -16,6 +16,7 @@ class MenuTests(unittest.TestCase):
             root = Path(folder)
             (root / "input.csv").write_text(csv_text, encoding="utf-8")
             for script in ["llm/v1/classify_biofin_category_with_vllm.py",
+                           "llm/v1/classify_biofin_category_with_vllm_V2.py",
                            "llm/v1/classify_biofin_category_with_ollama.py",
                            "transformer/v1/src/train_attention_classifier.py"]:
                 path = root / script
@@ -37,7 +38,7 @@ class MenuTests(unittest.TestCase):
             return shlex.split(commands[0])
 
     def test_vllm_api_options(self):
-        cmd = self.command([2, 3])
+        cmd = self.command([2, 3, 1])
         self.assertIn("llm/v1/classify_biofin_category_with_vllm.py", cmd)
         self.assertIn("VLLM_API_KEY", cmd)
         self.assertIn("--vllm-url", cmd)
@@ -45,6 +46,11 @@ class MenuTests(unittest.TestCase):
         self.assertIn("--workers", cmd)
         for option in ["--num-ctx", "--ollama-url", "--max-num-seqs", "--gpu-memory-utilization"]:
             self.assertNotIn(option, cmd)
+
+    def test_vllm_v2_script(self):
+        cmd = self.command([2, 3, 2])
+        self.assertIn("llm/v1/classify_biofin_category_with_vllm_V2.py", cmd)
+        self.assertIn("--vllm-url", cmd)
 
     def test_ollama_options_preserved(self):
         cmd = self.command([2, 2])

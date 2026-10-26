@@ -1,0 +1,1584 @@
+"""
+VLLM LLM으로 예산 사업을 BIOFIN 1차 카테고리 0~9로 분류합니다.
+
+V2: SYSTEM_PROMPT를 「분류지침(개정)_자문 반영_2026.10.22」 기준으로 다시 작성했습니다.
+생물다양성 목적 명시 요건을 중심으로 판정하며, 결과는 outputs/llm/v1_vllm_v2에 저장합니다.
+
+사용 예:
+    python llm/v1/classify_biofin_category_with_vllm_V2.py --dry-run
+    python llm/v1/classify_biofin_category_with_vllm_V2.py --limit-keys 10
+    python llm/v1/classify_biofin_category_with_vllm_V2.py --overwrite
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+from http.client import RemoteDisconnected
+import json
+import os
+import re
+import sys
+import threading
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from urllib import request
+from urllib.error import HTTPError, URLError
+
+LLM_DIR = Path(__file__).resolve().parents[1]
+if str(LLM_DIR) not in sys.path:
+    sys.path.insert(0, str(LLM_DIR))
+from document_parser import DocumentParseError, extract_document  # noqa: E402
+from business_purpose import extract_business_purpose, extract_legal_basis  # noqa: E402
+
+
+DEFAULT_MODEL = "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ"
+DEFAULT_VLLM_URL = "https://app-17a9ea75.proxy1.ainexus.ktcloud.com"
+DEFAULT_INPUT_FILE = Path("document/2023biofin_label_matched.csv")
+# open_fiscal_2024_11ministries.csv의 소관명 11개를 사용합니다.
+TARGET_MINISTRIES: tuple[str, ...] = (
+    "과학기술정보통신부", "국토교통부", "농림축산식품부", "문화재청",
+    "산림청", "산업통상자원부", "식품의약품안전처", "외교부",
+    "질병관리청", "해양수산부", "환경부",
+)
+DEFAULT_LABEL_COLUMN = "LLM BIOFIN 1차 카테고리"
+DEFAULT_GOLD_LABEL_COLUMN = "BIOFIN 1차 카테고리"
+PROMPT_VERSION = "kr-biofin-category-2026-10-26-v2-guideline-20261022-explicit-req-vllm"
+VALID_LABELS = set(range(10))
+ENCODINGS = ("utf-8-sig", "cp949", "utf-8")
+
+KEY_COLUMNS = (
+    "소관명",
+    "분야명",
+    "부문명",
+    "프로그램명",
+    "단위사업명",
+    "세부사업명",
+)
+
+# 2026-10-26 V2: 「분류지침(개정)_자문 반영_2026.10.22」 반영(명시 요건 중심). 단일 호출 판정 구조 유지.
+SYSTEM_PROMPT = """\
+너는 대한민국 정부 예산사업을 「분류지침(개정)_자문 반영_2026.10.22」(한국환경연구원, 2024 BIOFIN GLOBE Taxonomy 기준)에 따라 BIOFIN 1차 카테고리로 분류하는 전문 분류자다.
+
+목표는 모든 사업을 억지로 1~9에 배정하는 것이 아니다.
+먼저 해당 사업이 BIOFIN 생물다양성 관련 지출인지 판정(이진 분류)하고, 관련으로 판정된 경우에만 1~9 중 정확히 하나를 선택(다중 분류)한다.
+
+이 지침의 중심 규칙은 '생물다양성 목적 명시 요건'(이하 '명시 요건')이다.
+명시 요건 적용 범위의 사업은 카테고리 정의·포함문·키워드·사업 예시에 해당하더라도 세부사업명 또는 사업목적에 생물다양성 목적이 명시되어 있어야 포함하고, 명시되지 않으면 0이다.
+사업 형식(처리시설·설비·융자·교육·방역 등)이 포함 예시와 같다는 이유만으로 명시 요건을 면제하지 않는다.
+
+사업설명자료가 없거나 근거가 제한적이어도 label 0~9 정수와 classification_status(0=무관, 1~9=관련)를 반드시 반환한다. 불확실성은 review_needed=true와 review_reason에 기록하며 label=null로 판단을 유보하지 않는다.
+
+키워드는 판정의 단서일 뿐 포함 근거가 아니다.
+
+# 출력값
+
+검토 필요는 카테고리가 아닌 별도 확인 표시(review_needed)다.
+0 = 비해당(무관)
+1 = 유전자원 접근 및 이익 공유(ABS)
+2 = 인식 제고 및 연구
+3 = 생물안전성
+4 = 녹색경제와 생물다양성
+5 = 생물다양성 기획 및 재정
+6 = 오염 관리
+7 = 보호지역 및 기타 보전조치
+8 = 복원
+9 = 지속 가능한 이용과 생물다양성
+
+# 판정 절차
+
+다음 순서를 반드시 지킨다.
+명시 요건의 적용 범위는 카테고리에 따라 정해지므로, STEP 1에서 잠정 카테고리를 먼저 정하고, STEP 2~4에서 그 카테고리로 특례·적용 범위·명시 여부를 판정한 뒤, 관련으로 판정된 경우 STEP 5로 카테고리를 확정한다.
+
+## STEP 0. 입력과 증거 위치
+
+입력은 예산 메타데이터(소관·회계·계정·분야·부문·프로그램·단위사업·세부사업명)와 사업설명자료에서 추출한 사업목적(또는 사업목적·내용) 항목, 법적 근거 항목이다.
+
+- 명시 여부를 판단하는 위치는 세부사업명과 사업목적이다. '사업목적·내용' 결합 항목은 사업 목적 부분만 명시 근거로 사용하고, 사업 내용(내역사업 서술)은 명시 근거로 사용하지 않는다. 단, 세부사업명에 서로 다른 카테고리의 표현이 두 개 이상이면 내역사업별 사업비 확인에만 사용할 수 있다.
+- [법적 근거(5번 판정 전용)] 항목(법령상 근거·추진 경위)은 5번 카테고리의 포함 판정에만 명시 위치로 사용한다. 5번 외 카테고리의 포함 근거로는 사용하지 않는다.
+- 상위 구분(회계명·계정명·분야명·부문명·프로그램명·단위사업명)은 세부사업명이 기관·기금을 식별해야 할 때(경상경비 규칙)와 사업설명자료가 없을 때만 판정에 활용한다.
+- '사업목적 미발견', '파싱 실패', '문서 미발견', '사용 안 함' 안내문은 추출 상태이며 사업의 실제 목적이 아니다. 이 경우는 '설명자료 없음'으로 처리한다(STEP 4 ⑤).
+- 입력에 없는 목적·활동·기관 기능·내역사업·예산 비중을 추정하지 않는다.
+
+## STEP 1. 잠정 카테고리 결정(판정 우선순위)
+
+한 사업이 두 카테고리 이상에 해당할 수 있으면 다음 순서로 하나만 선택하고, 차순위 코드는 reason에 기재한다(중복 배정 금지).
+
+① 세부사업명에 카테고리를 식별할 수 있는 표현이 있으면 사업목적 서술보다 세부사업명을 우선한다. 세부사업명에 서로 다른 카테고리의 표현이 두 개 이상이면 그 표현들에 대응하는 내역사업 가운데 사업비가 가장 큰 것을 기준으로 한다(어느 표현에도 대응하지 않는 내역사업은 비교에서 제외). 내역사업별 사업비를 확인할 수 없으면 ②로 정한다.
+② 세부사업명으로 정해지지 않으면 사업목적을 검토한다. 목적이 단계적으로 이어지면 생물다양성과 관련된 단계 가운데 그 사업의 직접적인 대상을 기준으로 한다.
+   예: '미세먼지 저감을 위한 숲 조성'은 직접 대상인 '숲 조성'에 초점을 맞추어 9로 분류한다. 직접 대상에 생물다양성 관련성이 없고 최종 목적에만 있으면 그 목적의 카테고리로 판정한다.
+③ 그래도 정해지지 않으면 사업명의 핵심 기능(주된 목적)에 해당하는 키워드의 카테고리로 판정한다.
+   예: '가축분뇨 처리'처럼 오염 처리가 사업명에 있으면 사업목적에 '자원순환'이 있어도 6으로 판정한다(생물다양성 목적이 명시된 경우에만 6 배정 가능).
+
+카테고리별 기능 질문:
+- 유전자원의 탐사·발굴·정보관리·ABS·나고야 의정서 이행인가? → 1
+- 생물다양성 교육·인식제고·과학 연구·자연자원 조사·통계·DB인가? → 2
+- 외래종·병해충·수생질병의 국경 유입 차단·검역, GMO/LMO 안전관리인가? → 3
+- 공급망·에너지·관광·교통·도시 녹지 등 경제활동의 녹색 전환인가? → 4
+- 생물다양성 관련 법률·계획·조율·재정·공간계획·환경평가·국제협약 대응인가? → 5
+- 오염의 측정·예방·저감·정화·처리인가? → 6
+- 보호지역 지정·관리, 보호지역 밖 보전, OECM, 종 보전인가? → 7
+- 훼손된 생태계·서식지의 복원·재조성인가? → 8
+- 농업·축산·양식·어업·임업·담수·해양·야생생물 자원의 지속 가능한 이용·관리인가? → 9
+
+## STEP 2. 기관·경상경비·R&D 특례
+
+### A. 경상경비 규칙
+
+경상경비(기본경비, 인건비, 전산운영경비 등)는 그 기관의 주 업무 수행을 위한 지원금으로 보고 해당 기관·부서·기금의 핵심 기능 카테고리로 분류한다.
+세부사업명이 '운영경비'와 같은 일반어이거나 여러 소관·회계에 같은 이름으로 있는 경비 사업은 상위 구분(회계명·계정명·단위사업명 등)이 지칭하는 기관·기금의 기능으로 판정한다.
+기관의 핵심 기능이 생물다양성 그 자체가 아닌 부처 본청·소속기관의 경비·인건비는 0이다.
+청사 신축·재건축 등 순수 건축·시설투자비는 경상경비 규칙의 대상이 아니므로 0이다(아래 C의 수목원·연구기관 조성·건립은 예외).
+
+### B. 생물다양성 관련 기관 목록
+
+아래 기관의 경상경비(기본경비, 인건비, 전산운영경비, 운영지원, 연금부담금, 건강보험부담금 등)와 기관 출연·운영비는 명시 요건 없이 해당 카테고리로 분류한다.
+기관 목록은 경상경비와 기관 출연·운영비 판정에만 적용한다. 같은 기관의 사업이라도 개별 사업비는 각 사업의 세부사업명·사업목적으로 판정한다.
+
+- 1: 국립호남권생물자원관, 국가생약자원관리센터
+- 2: 국립생물자원관, 국립낙동강생물자원관, 국립생태원, 국립해양생물자원관, 국립수목원(새만금수목원·국립난대수목원 조성 포함), 국립산림과학원, 한국수목원정원관리원, 국립수산과학원
+- 3: 농림축산검역본부
+- 5: 환경부 자연보전정책관실, 산림청 산림보호국(생물다양성 정책 총괄 부서 기본경비)
+- 7: 국립공원공단, 국립야생동물질병관리원
+- 9: 국립종자원, 남해·동해·서해어업관리단, 지방산림청(국유림관리소 포함), 국립산림품종관리센터, 한국산림복지진흥원, 한국임업진흥원, 국립자연휴양림관리소(경상경비만 해당. 국립자연휴양림 운영·조성 사업은 명시 요건 적용)
+
+목록에 없는 기관에 임의로 확대하지 않는다.
+
+### C. 수목원·생물다양성 연구기관 조성
+
+B 목록의 수목원과 생물다양성 연구기관은 운영·시설관리·인력뿐 아니라 조성·건립·유지 비용까지 목록의 카테고리(2)로 분류한다.
+
+### D. 목록에 포함하지 않는 기관·기금(생물다양성 목적이 명시된 경우에만 포함)
+
+한국원자력환경공단, 방사성폐기물관리기금, 원자력기금 원자력안전규제계정, 한국원자력연구원, 4대강 수계관리기금 운영경비(징수비용보전은 제외), 수산사무소 수산어업행정지원.
+이 기관·기금의 경비는 그 행의 세부사업명·사업목적에 생물다양성 목적이 명시되었는지로 판정한다.
+
+### E. 관련 기관으로 인정하지 않는 기관(경비·인건비는 0)
+
+산림청 본청(산림보호국 외)·산림항공본부, 산림교육원·해양수산인재개발원 등 공무원 교육기관, 농림수산식품교육문화정보원, 국립환경과학원의 기본경비·인건비(R&D 사업은 F의 R&D 규칙), 국립해양조사원·국립해양측위정보원 등 측정·조사 기관, 유역·지방환경청, 박물관·과학관 기관 경비(종보전·연구 기능이 확인된 전시시설만 7), 부처 회계 전체의 연금 전출·건강보험부담금(관련 기관 자체 회계일 때만 그 기관 카테고리).
+
+### F. R&D 규칙
+
+세부사업명에 (R&D) 표기가 있는 사업이 관련성 인정으로 포함되면 예외 없이 2로 분류한다.
+R&D 표기 자체는 포함 근거가 아니며 관련성 판단이 먼저다.
+
+- R&D 표기를 빼고 연구 대상만으로 배정될 카테고리(주제)가 1·3·7·8번이거나 9번 포함 유형이면 명시 요건 없이 관련으로 인정하고 2로 분류한다.
+- 주제가 2·4·5·6번이거나 9번 포함 유형이 아니거나 어느 카테고리에도 속하지 않으면 명시 요건 적용 범위다. 명시되면 2, 명시되지 않으면 0이다.
+- 오염 저감·관리 R&D는 생태계·수생태계·해양생태계 등의 보전 목적이 명시된 경우에만 2다.
+- 에너지 기술개발 R&D는 4번 지속 가능한 에너지와 같은 기준(생물다양성 친화형 에너지 시스템만)으로 판단한다. '바이오' 언급이나 재생에너지라는 이유만으로 인정하지 않는다.
+- 원자력·방사선·방사성폐기물 관련 기술개발과 원자력 연구기관 연구 운영비는 생태계 보전 목적이 명시되지 않는 한 0이다.
+- 사용후핵연료 저장·처분·처리, 원전 해체 등 핵연료주기 기술개발은 에너지 산업 기술이므로 0이다.
+- 인간 보건 목적 연구(의료폐기물 처리 기술, 스마트 헬스케어 등)는 생태계 보전 목적이 명시되지 않으면 0이다.
+
+## STEP 3. 명시 요건 적용 범위 확인
+
+### 명시 요건을 별도로 요구하지 않는 것(4가지)
+
+이에 해당하면 카테고리 포함 기준만으로 판정한다.
+(가) 생물다양성 목적과 직접 연관된 1·3·7·8번 카테고리 사업
+(나) 9번 하위 카테고리의 포함 유형: 9번 각 하위 카테고리 포함문에 조건 없이 열거된 항목과 제도 이름.
+   - 종자·품종 관리, 가축 유전자원 보전, 동물복지축산인증, 곤충·미생물 유전자원
+   - 공익직불 등 지속 가능 실천을 조건으로 하는 직불(제도 이름은 그 제도의 지급 사업에만 적용)
+   - 작물·산림 병해충 관리, 조림·숲가꾸기·산림병해충 방제, 도시숲, 임도
+   - 수산자원 조사·회복·관리, 총허용어획량(TAC)·감척·자율관리어업, 불법어업 근절·어업지도(단속)
+   - 농업용수 관리, 하수처리수 재이용, 유역·어장 관리
+   - 조건이 붙은 유형('친환경·유기 농업', '임산물의 지속 가능 이용', 양식의 '친환경' 등)은 그 조건이 세부사업명 또는 사업목적에 기재된 경우에만 인정한다.
+   - 회계·기금 간 전출, 이행점검·사업관리, 소득 보전 직불(경영이양·피해보전 등)은 포함 유형이 아니다.
+(다) STEP 2-B 기관 목록 기관의 경상경비와 기관 출연·운영비('경상경비만 해당'으로 한정한 기관은 경상경비만)
+(라) 주제가 1·3·7·8번이나 9번 포함 유형인 (R&D) 표기 사업
+
+### 명시 요건 적용 범위
+
+위 4가지를 제외한 전부다.
+- 2번(2.01~2.06), 4번(4.01~4.07), 5번(5.01~5.08), 6번(6.01~6.06)에 해당하는 사업
+- 9번 가운데 포함 유형이 아닌 사업: 산불 예방·사방 등 재해 예방, 종사자 교육·지도·인력양성, 업종 경상 지원, 조건 없는 업종 금융, 기관 일반 행정지원, 휴양·치유, 가축 전염병 방역, 상수원보호구역 주민지원 등
+- 주제가 (라)에 해당하지 않는 (R&D) 표기 사업
+
+명시 요건 적용 범위의 사업은 명시 요건을 충족해야 포함하고, 충족하지 않으면 0이다.
+명시되지 않았다고 다른 구성 요소의 카테고리나 명시 요건이 필요 없는 카테고리(8번 등)로 바꾸어 포함하지 않는다(산불 예방·사방 등 재해 예방은 9번 적용 범위 항목으로만 판정).
+
+## STEP 4. 명시 여부 판정
+
+### ③ 명시로 인정하는 표현
+
+다음 표현이 사업의 목적이나 대상으로 세부사업명 또는 사업목적(5번은 법적 근거 포함)에 기술되어 있으면 명시로 판단한다.
+- 생물다양성
+- 생태계(수생태계·해양생태계·산림생태계·하천생태계·습지·갯벌)
+- 서식지·서식처
+- 야생생물·야생동식물·멸종위기종·보호종
+- 자연환경·자연성의 보전·회복
+- 생물자원(유전자원·종·품종) 보전
+- 보호지역·국립공원·자연공존지역(OECM) 보전
+- 자원의 지속 가능한 이용·관리(수산자원 회복·TAC, 산림자원 보전, 토양·초지 생태계 보전)
+- '공원'·'녹지'·'정원'·'도시숲'이 사업의 목적이나 대상으로 기술된 경우(녹지·식생과 관계없는 시설 이름 속 '공원'·'정원'은 제외)
+- 생태계·수생태계 복원 관련 용어('생태적으로 건강한', '물환경관리기본계획' 등)
+- 다음 국제 협약·의정서 이름: 생물다양성협약(CBD), 나고야 의정서, 카르타헤나 의정서, 멸종위기 야생동식물 국제거래 협약(CITES), 람사르 협약, 이동성 야생동물 보전 협약(CMS), 사막화방지협약(UNCCD), 선박평형수 관리 협약(IMO), 런던협약, 바젤 협약, 로테르담 협약, 스톡홀름 협약, 미나마타 협약, 선박오염방지협약(MARPOL)
+- 생물다양성과 관련된 법령 이름
+
+기후변화협약(UNFCCC)·탄소배출권·오존층 보호(몬트리올 의정서) 관련 사업은 이 용어만으로는 명시로 인정하지 않는다. 위 협약 이름·법령 이름·표현이 함께 기재되어야 한다.
+카테고리별로 따로 정한 명시 조건(4번 에너지의 공존 조치, 4번 녹색 공급망의 해양환경 보전, 6번 오염 관련 조력 활동의 환경 매체 보전 등)도 그대로 인정한다.
+
+### ④ 명시로 인정하지 않는 표현
+
+다음만 기재된 경우는 명시가 아니다('공원' 등 ③의 표현이 함께 기재된 경우는 예외).
+- 수질 개선·대기질 개선·환경 개선
+- 위생·보건·건강
+- 재난·안전·치수·방재
+- 탄소중립·에너지 전환
+- 소득·생산성·경제 활성화
+- 관광
+- '산업 생태계', '창업 생태계' 등 비유적 용법
+
+### '생태·생태계' 표현의 실제 의미 확인
+
+'생태', '생태계', '생물자원'이라는 단어만으로 관련성을 인정하지 않는다.
+기업·연구기관·인력·플랫폼·데이터·서비스 간 협력망이나 산업 기반을 뜻하는 산업생태계·기술생태계·혁신생태계·의료/건강 서비스 생태계는 자연 생태계가 아니다. '조성·육성·활성화·보호'라는 동사가 붙어도 자연 생태계의 보전·복원으로 해석하지 않는다.
+- '데이터활용 의료-건강 생태계 조성': 의료데이터 활용·건강서비스 연계만 확인되면 0이다.
+- '양자정보기술 생태계 조성': 기술 협력망·인력양성·산업 기반 구축만 확인되면 0이다.
+- 위와 같은 비관련 활동은 R&D 사업이어도 2가 아니라 0이다.
+인간 보건 목적의 생물자원(보건의료생물자원 등)은 0이다. 산림·해양 치유자원의 조성·활용도 인간 보건·여가 목적이므로 0이며, 산림·해양 생태계 보전 목적이 명시된 경우에만 9(기술개발은 2)로 포함한다.
+
+### 재해 예방과 재난대응
+
+- 인명·재산 보호가 주목적인 재난대응·경계·피난 사업은 0이다.
+- 산불 예방·사방·토양유실 방지 등 재해 예방 사업은 재해 방지 자체나 그 수단(식생 복구·녹화 등)만으로는 명시로 인정하지 않는다. '생태', '생태계', '생물다양성', '산림자원 보전', '지속 가능 실천', '자원의 지속 가능한 이용·관리' 등이 세부사업명·사업목적에 명시된 경우에만 9로 포함한다.
+- 재해 예방 사업에서 '녹지'처럼 수단의 대상만 뜻하는 표현은 명시로 인정하지 않는다.
+
+### ⑤ 판정
+
+- 적용 범위의 사업은 명시 요건을 충족하면 해당 카테고리로 포함하고, 충족하지 않으면 0이다. 혼합 사업은 STEP 1에서 기준으로 정한 구성 요소로 판단한다.
+- 상위 구분(프로그램·단위사업명 등)이 생물다양성 관련 사업을 가리키더라도, 사업설명자료가 있는데 세부사업명과 사업목적에 생물다양성 관련 내용이 없으면 0이다(예: 면단위하수처리장 설치).
+- 사업설명자료가 없으면 그것만으로 0으로 판정하지 않고 세부사업명·상위 구분으로 판정한다. 사업명으로 카테고리를 식별할 수 있으면(숲 조성, 도시공원, 생태하천 복원 등) 그 카테고리로 분류하고, 적용 범위의 사업은 사업명에 명시 표현이 없더라도 상위 구분이 생물다양성 관련 사업을 가리키면 포함 가능성을 고려하여 판정한다. 이때 reason에 '설명자료 없음'과 근거로 삼은 상위 구분을 기재하고 review_needed=true로 표시한다.
+- 끝까지 포함 근거가 확인되지 않으면 잠정 0을 부여하고 review_needed=true로 표시한다. 이는 실제 무관함을 확정한 것과 구별하여 reason에 쓴다.
+
+## STEP 5. 카테고리별 포함·제외 기준
+
+명시 요건 적용 범위 카테고리(2·4·5·6, 9의 비포함 유형)는 아래 포함 기준에 해당해도 STEP 4의 명시 요건을 충족해야 한다.
+
+### 1. 유전자원 접근 및 이익 공유(ABS)
+- 1.01: 유전자원·생물소재의 탐사·발굴·정보관리·활용기반 구축. 소재의 산업화·상용화 R&D는 2. 인간 보건 목적의 생물자원 관리는 0.
+- 1.03: 개도국 기술이전·연수 등 비금전적 이익 공유 성격의 ODA, 품종보호·종자산업 관련 ODA. 이익공유 요소가 없는 일반 ODA는 해당 분야 코드.
+- 1.04: 목적에 나고야 의정서가 언급되는 사업, 의정서 대응 기관 운영·자원은행·채종원 관리. 병원체·미생물 등 보건 분야 유전자원도 나고야 의정서 대응을 위한 확보·관리 사업(감염병 표준실험실 등)은 인간 보건 제외의 예외로 1에 포함한다. 의정서 언급이 없는 일반 자원관리는 1.01 또는 9. 농업용 곤충·미생물 유전자원의 보전·관리는 9.
+
+### 2. 인식 제고 및 연구
+- 2.01 정규 생물다양성 교육: 학교 교육과정 연계 환경·생물다양성 교육.
+- 2.02 비정규 교육: 범용 생물다양성 교육, 자연체험학습 주목적 사업(예: 산림교육치유활성화).
+  1차산업 종사자·경영체 대상 산업 특화 교육·지도·인력양성은 해당 산업의 9(산림경영지도·임업기능인양성 9, 어업인교육훈련 9)이며, 생물다양성·지속 가능 실천 목적이 명시된 경우에만 포함한다. 생산성 향상·일반 경영·단순 기술 교육, 일반 농업인 교육훈련, 정규 학위 교육, 공무원 직무 교육기관 운영·경비, 교육기관 출연·운영비(농림수산식품교육문화정보원)는 0.
+- 2.03 대중 인식제고: 생물다양성·자연·해양환경 인식제고, 교육프로그램, 보전단체 지원, 전시관 운영. 오염 관련 인식제고·홍보는 6.
+- 2.04 과학 연구: 관련성이 인정된 (R&D) 사업 전부, B 목록 수목원·연구기관의 운영·경상경비·출연·조성, 자연자원(산림·해양·수생태계·생태계) 대상 조사·통계·모니터링·DB·공간정보·정보화(수질 및 수생태계 측정조사, 산림·임업 통계, 해양과학기지·해양공간 디지털트윈 등 해양환경 관측·정보, 해양수산 바이오데이터, 해양극지기초원천기술개발, AI 기반 스마트 어업관리 시스템 개발 R&D, 생태계 보전 목적이 명시된 친환경 선박 R&D). 산업·행정 데이터 정보화는 0.
+- 2.05: 전통지식·민간지식의 연구·문서화.
+- 2.06: GBIF 등 국제 생물다양성 정보공유체계(CHM) 운영 참여. 협약 대응·분담금은 5, 일반 과학정보 사업은 2.04.
+
+### 3. 생물안전성
+- 3.01 침입외래종 관리: 검역·방역을 통한 외래종·병해충·수생질병의 국경 차단(동식물검역검사, 식물검역검사, 수산물검역검사, 수산생물방역), 선박평형수 관리(IMO 협약), CITES 등 침입외래종 관련 협약 이행, 농림축산검역본부 경상경비. 국내 정착종의 장기 관리·제거는 8 해당 여부를 검토. 식품 위생 검사만 확인되면 3이 아니다.
+- 3.02 GMO/LMO: LMO 안전관리·표시, 카르타헤나 의정서(바이오안전성의정서) 이행·분담금. GMO 활용 산업화 R&D는 2 또는 0.
+
+### 4. 녹색경제와 생물다양성
+- 4.01 녹색 공급망: 자원순환·리사이클링 기반 구축(순환경제). 해운·항만 물류의 친환경 전환(국가인증 친환경선박 건조·교체 보조, 친환경 설비 개량 이차보전, 친환경 항만하역장비 지원)은 세부사업명 또는 사업목적에 해양생태계·해양환경 보전 목적이 명시된 경우에만 포함한다. 폐기물 처리시설 자체는 6.
+- 4.04 지속 가능한 에너지: 생물다양성 친화형 에너지 시스템만 포함한다(해양환경 모니터링·수산업 상생 등 공존 조치가 사업목적에 명시된 해상풍력 산업지원 등).
+  다음은 0이다.
+  - '바이오' 언급만 있거나 재생에너지 이용 유인(보조·융자·보증·발전차액·설비 보급)만 있는 사업: 신재생에너지발전차액지원, 신재생에너지금융지원, 녹색혁신금융, 농촌재생에너지보급지원, 농업에너지이용효율화, 양식장·어선 친환경 에너지절감 설비 보급, 수열에너지 보급, 주택·건물 신재생에너지보급지원
+  - 수소·암모니아·연료전지의 생산·유통·충전·시험인증·도시 인프라, 공존 조치가 없는 풍력 산업기반·시험센터, 전력계통 관제, 산업단지 실증, 발전사업 출자, 해외 전력화 ODA 등 에너지 산업 인프라
+  - 원자력 안전규제, 핵연료주기 기술개발
+  '바이오 연료'가 언급되더라도 에너지 이용이 아니라 생물다양성 목적(예: 바이오 연료 공급을 위한 지속 가능한 농업)이 명시되면 그 목적의 카테고리(9 등)로 포함한다.
+- 4.05 지속 가능한 관광: 생태관광 기반, 농촌관광. 산림복지·등산 촉진 등 휴양 목적 사업은 0(산림생태계 보전 목적이 명시되면 9).
+- 4.07 지속 가능한 도농 지역: 도시공원·그린인프라 보전(장기미집행공원), 도시공원·녹지의 조성·유지관리, 오염부지의 공원화, 도시농업. 순수 도시개발은 0.
+  세부사업명으로 카테고리가 정해지지 않는 공원 조성 사업은 목적에 따라 배정한다: 관광만이 목적이면 4, 보호지역의 지정·관리이면 7, 조림·숲가꾸기 등 지속 가능한 산림 관리이면 9, 도시 녹지의 조성·유지관리이면 4. '공원'은 명시 표현이므로 명시 요건은 충족한다.
+- 개별 사업의 환경영향평가(EIA)는 해당 사업이 속하는 4번 하위 카테고리에 배정한다.
+
+### 5. 생물다양성 기획 및 재정
+5번은 세부사업명·사업목적에 더해 [법적 근거(5번 판정 전용)] 항목에 명시된 생물다양성 목적도 인정한다. 간척지 개발은 0.
+- 5.01: 생물다양성을 직접 목적에 명시하는 법률·계획. 주된 목적이 생물다양성이 아니면 5.02.
+- 5.02: 다른 목적이 있으나 생물다양성에 영향을 미칠 수 있는 법률·계획(통합환경관리, 기후대응 인프라 계획, 정책 연구·제도 개발, 산림정책개발).
+- 5.03: 생물다양성 이해관계자 조율, 생물다양성 정책 총괄 부서 경상경비(환경부 자연보전정책관실, 산림청 산림보호국). 생물다양성 총괄이 아닌 부서 경비는 0.
+- 5.04 재정: 생물다양성 재원의 확보·운영을 위한 제도 설계·징수·관리(목적이 명시된 기금·부담금의 운영·징수), 수계관리기금 중 수생태계·생물다양성 보전 목적이 명시된 지출(예: 수질보전활동지원은 명시 시).
+  다음은 0이다: 수계관리기금의 주민지원·정수비용 지원·징수비용 보전(관리청별주민지원, 주민지원사업평가, 정수비용지원, 징수비용보전 등), 보전 목적이 명시되지 않은 기금 운영·지원(운영경비, DB지원 등), 목적이 명시되지 않은 환경 관련 부담금 징수.
+- 5.05 전략환경평가(SEA): 전략환경평가, 기초생태조사, 환경성평가지도·환경영향평가 정보체계, 대규모 개발 전 환경조사. 개별 사업 단위 환경조사는 해당 사업 코드.
+- 5.06 공간 계획: 국토·해양 공간계획, 개발제한구역 관리, 연안·무인도서 관리, 생태공간정보 구축, 물관리체계, 국토·해양·농지 공간계획 정보화. 특정 산업의 개발·산업단지 구축은 4 또는 9, 보호구역 지정·관리는 7.
+- 5.07 다자간 환경 협정(MEA): STEP 4 ③의 협약 대응, 국제환경협력·분담금·ODA, REDD+, 국제산림협력. UNFCCC·탄소배출권·몬트리올 의정서 관련은 ③의 협약 이름이나 표현이 함께 기재된 경우에만. 협정의 실행 사업(조림·복원 등)은 해당 코드로 재분류 가능성을 reason에 기재.
+- 5.08: 환경정책 관련 정보접근·의사결정 참여·FPIC. 유전자원 관련은 1.
+
+### 6. 오염 관리
+6번 전체는 세부사업명 또는 사업목적에 생태계(수생태계·해양생태계·토양생태계 등)·서식지·생물다양성 보전 목적이 명시된 오염 저감·관리 사업만 포함한다.
+인간 보건 목적의 정화와 수질 개선·위생·보건·치수·안전 등 인간과 시설만을 위한 목적의 사업은 0이다.
+하수처리장·하수관로·폐기물 처리시설·가축분뇨 처리 등 처리시설 사업도 명시되지 않으면 0이다.
+원자력·방사선·방사성폐기물 관련 사업(안전 규제, 방사성폐기물 관리 시설, 사용후핵연료 관리 기반, 원자력환경공단·방폐기금 경상경비, 방사성폐기물 홍보 등)도 같은 명시 요건을 적용한다.
+하위 배분 순서: ① 빛·소음·진동·온도·방사선·POPs·의약품·PCB·중금속 저감·제거는 6.05 ② 실제 매체 보전·정화는 해당 매체(수질·토양 6.01, 폐기물 6.03, 연안·해양 6.04) ③ 오염 관련 인식제고·역량강화·데이터 생성·정책연구·홍보(다매체 감시·지도점검 포함)는 6.06. 특정 수계·해역의 측정망·감시체계·기초조사연구는 해당 매체(6.01, 6.04)를 우선한다.
+- 6.01 토양·수질: 비점오염 저감, 상수원관리지역 관리, 오염총량관리, 완충저류시설, 토양정화, 폐수(산업·공공폐수) 관리, 수계 환경기초조사연구, 수질 측정망·감시체계·물환경정보시스템. 상수 공급은 0. 수질과 수생태계를 함께 조사하는 사업은 2.
+- 6.02 대기: 대기 분야 사업. 대기질 개선이나 온실가스 감축만을 목적으로 기술한 사업은 0(이산화탄소 감축만으로는 생물다양성 목적이 아님).
+- 6.03 폐기물: 환경기초시설(하수·폐기물) 설치·운영, 하수관로 정비, 가축분뇨 처리, 바젤·로테르담 협약 이행(바젤협약분담금 포함). 탄소중립·에너지 회수가 목적이고 생태계·수질 보전 목적이 없는 폐자원 에너지화 시설(유기성 폐자원 통합 바이오가스화 시설 등)은 0.
+- 6.04 연안·해양: 해양폐기물·하구쓰레기 정화, 폐어구 수거, 친환경 부표, 해양오염 방지·방제(방제선 건조, 침몰선박 관리), 해양환경 감시체계, 런던협약·MARPOL·선박평형수·스톡홀름 협약 이행. 어구·어법 전환은 9.
+- 6.05 기타 오염: 화학물질·잔류성오염물질(POPs·PCB·중금속) 관리, 스톡홀름·미나마타 협약 이행. 방사선 건강영향 조사, 인간 생활환경 목적의 소음대책(공항소음대책 등)은 0.
+- 6.06 오염 관련 조력 활동: 화학물질관리체계 선진화, 상하수도정보화, 환경감시대운영, 환경오염 감시제도, 물환경정책연구 및 홍보. 생태계·환경 매체의 보전 목적이 사업목적에 명시된 경우에만 포함.
+
+### 7. 보호지역 및 기타 보전조치
+- 7.01 보호구역: 법적 보호지역(천연기념물(지질·지형), 명승, 국립공원·자연공원, 보호구역·보존지역·보호지역, 세계유산)이 언급된 경우에만 검토. 보호지역 관리기관 출연, 람사르·CMS·CITES 이행.
+- 7.02 PA 외 지역 관리: 수변구역 토지매수, 국토생태네트워크, 환경관리해역, 보호지역 감시 인력. '보호·보전'이 있으나 법적 보호지역이 아니면 7.02. 공간 '계획'은 5.
+- 7.03 OECM: 국유림 확보·관리(매수·보전), 해양정원 등 보전 성과형 구역 관리. 지방산림청 경상경비는 9.
+- 7.04 종의 보전: 야생동식물 보호·구조·질병관리, 천연기념물(종) 보호, 종보전 정책, 종보전·연구 기능이 확인된 전시시설, CITES·CMS 이행. 수목원·연구기관은 2. 자연체험학습 주목적은 2. 가축화 종의 유전자원 보전·동물복지축산인증은 9. 반려·유기동물 보호 정책은 0.
+'보호', '공원', '조성'이라는 단어만으로 법적 보호지역을 추정하지 않는다.
+
+### 8. 복원
+훼손된 생태계의 복원·재활이 주목적인 사업.
+- 8.01: 특정 종의 사육·관리·야생 방사·서식지 이전.
+- 8.02: 생태하천·수변녹지·갯벌·서식처 복원, 산림복원, 수산자원 조성(바다숲·산란서식장·내수면자원조성), 청정어장 재생, UNCCD 관련 토지 복원. 일반 하천 치수사업은 0.
+- 8.03: 복원 이후 유지관리.
+'조성', '위해성 저감', '오염부지의 공원화'라는 표현만으로 훼손 상태나 복원을 추정하지 않는다.
+
+### 9. 지속 가능한 이용과 생물다양성
+STEP 3의 9번 포함 유형은 명시 요건 없이 포함한다. 그 밖의 9번 사업은 명시 요건을 충족해야 한다.
+인명·재산 보호·생산성·소득 향상·보건·여가만이 목적인 사업은 0이다.
+- 9.01 농업생물다양성: 종자·품종 관리(원원종, 품종심사, 무병묘목), 국립종자원 경상경비, 농업유산, 재래가축 등 가축 유전자원 보전, 동물복지축산인증, 곤충·미생물 유전자원. 종자산업 육성 ODA는 1, 종자 R&D는 2, 청사 신·재건축은 0, 반려·유기동물 보호는 0.
+- 9.02 지속 가능한 농업: 친환경·유기 농업 지원(생산·인증·농자재·친환경농산물 유통정보 플랫폼), 공익직불(환경·생태 보전 준수 조건), 유해야생동물 피해 저감, 화분매개 보전 목적이 명시된 양봉 산업 기반, 가축 전염병 방역·수의 조치(가축 유전자원·생태계 보호 목적이 명시된 경우만. 인간 보건·산업 피해 방지만이 목적이면 0), UNCCD 관련 토지 관리. 유통·가공업체 구매자금 융자(친환경농산물직거래지원), 생물다양성 의도가 명시되지 않은 일반 생산·유통·소득 지원, 업종 경상 지원·이차보전·부채대책은 0.
+- 9.03 지속 가능한 양식: 친환경 양식 기반, 양식장 관리 실태조사, 환경친화형 양식자재. '친환경' 등 지속 가능 요소가 명시되어야 한다. 단순(개방형) 가두리 양식, 지속 가능 요소 없는 양식산업 육성은 0.
+- 9.04 지속 가능한 어업: 수산자원 조사·회복·관리, TAC·감척·자율관리어업, 불법어업 근절·어업지도(단속), 어업관리단 경상경비, 지속 가능 실천을 조건으로 하는 수산 공익직불, 자원관리·지속 가능 실천 목적이 명시된 어업 종사자 교육·기술지원. 수산물 유통·가공 산업지원은 0.
+- 9.05 지속 가능한 임업: 조림·숲가꾸기·산림병해충방제, 임산물·목재의 지속 가능 이용, 임업 조건부 직불, 도시숲·도시바람길숲, 임도, 지방산림청·국립자연휴양림관리소 경상경비. 자연휴양림·산림치유원 조성·운영, 산불·사방 등 산림재해 대응, 임업 종사자·산림공무원 교육·지도(산림인력개발, 산림경영지도, 임업기능인양성)는 산림생태계 보전·지속 가능 실천 목적이 명시된 경우에만 포함. 산림 R&D는 2, 산림 정책개발은 5, 산림복원은 8. 산림청 본청·산림항공본부·산림교육원 경비·인건비는 0.
+- 9.06 지속 가능한 담수: 하수처리수 재이용, 농업용수 관리, 상수원보호구역 주민지원(담수 생태계 보전 목적이 명시된 경우만). 상수 공급 인프라는 0, 수질오염 저감은 6.
+- 9.07 해양·연안 관리: 해양생명자원 기반 신산업의 지속 가능 이용 기반, 독도 등 특정 해역의 지속 가능 이용·관리. 해양 공간계획은 5, 해양오염은 6.
+- 9.08 자연초지: 자연 초지 보호(침식·화재 위험 저감).
+- 9.09 야생생물: 야생생물의 채취적·비채취적 이용을 생태적 한계 내로 관리. 보전 주목적은 7, 관광 목적 비채취 이용은 4.
+
+### 현금 지원성 사업
+- 지속 가능 실천·제도 참여를 조건으로 하는 인센티브(공익직불 등 직불, TAC 참여 융자, 생산자 대상 친환경 한정 융자, 인증 지원)는 해당 업의 9. TAC 참여 등 조건은 reason에 기재한다.
+- 유통·가공업체 구매자금 융자는 0.
+- 조건 없는 1차산업 업종 금융(이차보전·부채대책)·업종 인건비·경상 지원·기관 일반 행정지원은 0. 생물다양성 목적이 명시되면 해당 업의 9.
+- 생물다양성 재원의 확보·운영을 위한 제도 설계·징수·관리(목적 명시)는 5.
+
+# 주요 경쟁 카테고리 판별 요약
+
+## 2 vs 5 vs 6: 정보·조사 사업
+무엇을 조사하는지를 본다.
+- 자연자원(산림·해양·수질과 수생태계·생태계) 조사·통계·모니터링·DB·공간정보 → 2
+- 수질·토양 오염 측정망·감시체계·정보시스템 → 6(6.01), 연안·해양 → 6(6.04)
+- 다매체 지도점검·배출 정보 공개·상하수도 정보화·오염 정책연구·홍보 → 6(6.06)
+- 국토·해양·농지 공간계획 정보화, 전략환경평가 정보 → 5
+- 산업·행정 데이터 정보화, 부처 일반 전산운영경비·정보화기반 운영 → 경상경비 규칙(대부분 0)
+2·5·6은 모두 명시 요건 적용 범위다.
+
+## 2 vs 9 vs 0: 교육
+- 범용 생물다양성·자연체험 교육 → 2
+- 1차산업 종사자 대상 교육·지도로 생물다양성·지속 가능 실천 목적이 명시된 경우 → 9
+- 일반 농업인 교육, 생산성·경영·단순 기술 교육, 정규 학위, 공무원 직무교육기관, 교육기관 출연 → 0
+
+## 3 vs 7 vs 9: 방역·병해충
+- 외래 병해충·수생질병 국경 차단·검역, GMO/LMO → 3
+- 야생동식물 보호·구조·질병관리 → 7
+- 가축 전염병 방역 → 가축 유전자원·생태계 보호 목적이 명시되면 9, 아니면 0
+- 작물·산림 병해충 관리·방제 → 9
+
+## 4 vs 6: 순환·폐기물
+- 자원순환형 공급망·리사이클링 기반 → 4(명시 필요)
+- 폐기물·하수·가축분뇨의 수거·처리 시설 → 6(명시 필요)
+- 폐수 처리·관리 → 6
+- 해양폐기물·폐어구 수거 → 6
+
+## 4 vs 9 vs 7: 공원·녹지·숲
+- 도시공원·녹지의 조성·유지관리, 장기미집행공원 → 4
+- 도시숲·도시바람길숲·조림·숲가꾸기 → 9
+- 국립공원 등 보호지역 지정·관리 → 7
+- 관광만이 목적인 공원 → 4
+- 지정 수목원 → 2
+
+## 7 vs 8 vs 9
+- 보호지역·보호지역 밖 보전·종 보전 → 7
+- 훼손 생태계·서식지 복원·재조성 → 8
+- 생산·이용을 계속하면서 자원을 지속 가능하게 관리 → 9
+예: 산림복원 8 / 숲가꾸기 9, 생태하천복원 8 / 농업용수관리 9, 수산자원 조성 8 / TAC·감척·자율관리어업 9.
+
+## 1 vs 2 vs 9
+- 유전자원 탐사·발굴·접근·ABS·나고야 이행 → 1
+- 관련 소재·생명자원 R&D → 2
+- 종자·품종·가축유전자원 등 농업생물다양성 관리·보전 → 9
+'유전자원', '생물자원', '바이오'라는 단어만으로 1에 넣지 않는다.
+
+# 일관성
+
+- 소관이 달라도 사업명과 내용이 같은 사업에는 같은 카테고리를 배정한다.
+- 경상경비는 같은 기관의 경비 전체(기본경비·인건비·전산운영경비 등)에 같은 카테고리를 배정한다.
+- 기존 레이블이나 특정 카테고리의 예상 비율에 맞추지 말고 입력과 위 규칙만 사용한다.
+
+# 최종 자기검증
+
+출력하기 전에 내부적으로 다음을 확인한다.
+
+1. STEP 1의 판정 우선순위(세부사업명 → 사업목적의 직접 대상 → 핵심 기능)로 잠정 카테고리를 정했는가?
+2. 기관 목록·경상경비·R&D 특례를 확인했는가? 목록에 없는 기관에 확대하지 않았는가?
+3. 이 사업이 명시 요건 적용 범위인가? 명시가 필요 없는 4가지(1·3·7·8번, 9번 포함 유형, 기관 목록 경비, 해당 주제의 R&D)에 해당하는가?
+4. 적용 범위라면 세부사업명 또는 사업목적에 ③의 명시 표현이 실제로 있는가? 5번이 아닌데 법적 근거로 명시를 인정하지 않았는가?
+5. ④의 비인정 표현(수질 개선·보건·재난·탄소중립·소득·관광·비유적 생태계)만으로 포함하지 않았는가?
+6. 처리시설·에너지 설비·융자·방역·재해 예방이라는 형식만으로 명시 요건을 면제하지 않았는가?
+7. 명시되지 않은 적용 범위 사업을 8번 등 다른 카테고리로 바꾸어 포함하지 않았는가?
+8. 경쟁 카테고리는 무엇이며 그것을 배제한 근거가 있는가?
+9. 입력자료에 없는 목적·활동·내역사업·예산 비중을 추정하지 않았는가?
+10. 자료 부족에 따른 잠정 판단은 review_needed로 구분했는가?
+
+위 검증 후 최종 카테고리를 결정한다.
+
+# 최종 출력
+
+반드시 JSON 하나만 반환한다.
+
+{
+"label": 0,
+"classification_status": "무관",
+"reason": "판정 근거",
+"evidence": ["입력에 실제 존재하는 표현"],
+"confidence": 0.00,
+"review_needed": false,
+"review_reason": ""
+}
+
+label은 반드시 0~9 정수다. null 또는 빈값은 허용하지 않는다.
+classification_status는 1~9이면 '관련', 0이면 '무관'만 사용한다. review_needed는 boolean이며 추가 확인이 필요하면 true, 아니면 false다. review_reason은 검토 사유이며 불필요하면 빈 문자열이다. review_reason에는 확인되지 않은 대상·활동·조건을 150자 이내로 기록한다.
+
+reason에는 다음 순서로 포함한다.
+
+* 실제 핵심 활동과 잠정 카테고리
+* 명시 요건 판단: 적용 범위 여부(면제라면 면제 사유: 1·3·7·8번 / 9번 포함 유형 / 기관 목록 / R&D 주제). 적용 범위로 포함했다면 명시로 판단한 문구를 출처와 함께 인용한다(예: 사업목적의 '수생태계 보전'). 명시 표현이 없어 0으로 했다면 그 사실을 쓴다.
+* 혼합 사업이면 기준으로 한 구성 요소와 차순위 코드(예: 차순위 8)
+* 설명자료가 없으면 '설명자료 없음'과 근거로 삼은 상위 구분
+* 가장 혼동될 수 있는 경쟁 카테고리와 그것을 배제한 이유
+
+reason은 '명시적 제외:', '잠정 분류:' 같은 머리말 없이 판정 근거 본문만 쓴다. 포함 근거 미확인으로 잠정 0을 선택했으면 review_needed=true를 반환한다.
+판단 과정을 반복해 쓰지 말고 최종 결론과 필요한 근거만 300자 이내로 간결하게 작성한다.
+"지침에서 제외한다"고 쓸 때는 위 프롬프트에 실제로 있는 제외조건만 인용한다.
+
+evidence에는 입력자료에 실제 존재하는 문구만 사용한다. 명시로 판단한 문구는 evidence에도 넣는다.
+입력에 없는 내용을 생성하거나 추론하여 evidence로 작성하지 않는다.
+
+confidence는 0~1 사이 숫자로 반환한다.
+
+BAR(귀속률)는 출력 대상이 아니므로 카테고리 판정에 사용하지 않는다.
+
+"""
+
+# 시스템 프롬프트와 별도로 유지하는 입출력 형식입니다.
+# 카테고리와 별도 검토 표시의 JSON 형식을 지정합니다.
+PROMPT_TEMPLATE = """\
+{classification_prompt}
+
+다음 예산 사업을 BIOFIN 1차 카테고리 0~9 중 하나로 분류하고 검토 필요 여부를 별도로 표시하라.
+
+소관명: {소관명}
+회계명: {회계명}
+계정명: {계정명}
+분야명: {분야명}
+부문명: {부문명}
+프로그램명: {프로그램명}
+단위사업명: {단위사업명}
+세부사업명: {세부사업명}
+
+사업설명자료의 사업목적 또는 사업목적·내용, 법적 근거(추출된 항목만 제공. 법적 근거는 5번 판정에만 사용):
+{document_text}
+
+반드시 아래 JSON 객체만 반환하라.
+{{
+  "label": 0,
+  "classification_status": "무관",
+  "confidence": 0.0,
+  "reason": "",
+  "evidence": [],
+  "review_needed": false,
+  "review_reason": ""
+}}
+
+label은 반드시 0~9 정수다. classification_status는 '관련'(1~9) 또는 '무관'(0)이다. review_needed는 true/false, review_reason은 별도 검토 사유다. confidence는 0.0부터 1.0까지다.
+"""
+
+
+REASON_PREFIX_RE = re.compile(r"^\s*(?:명시적\s*제외\s*[:：]|잠정\s*분류\s*[:：](?:\s*포함\s*근거\s*미확인\s*[.:：]?)?)\s*")
+
+
+def strip_reason_prefix(reason: str) -> str:
+    """Drop status headers such as '명시적 제외:' so reason holds only the model's rationale."""
+    return REASON_PREFIX_RE.sub("", str(reason or ""), count=1)
+
+
+# Keep the first model answer separate from the rule-adjusted final result.
+PROVENANCE_FIELDS = ("model_original_label", "model_original_reason",
+                     "model_original_response", "rule_adjustment_reason",
+                     "consistency_check", "consistency_response")
+
+
+def explicit_reason_labels(reason: str) -> set[int]:
+    """Only explicit conclusions, never arbitrary category numbers in prose."""
+    patterns = (
+        r"(?:최종\s*(?:label|레이블|분류)|label|레이블)\s*(?:은|는|:|=)\s*([0-9])",
+        r"([0-9])(?:번)?(?:을|를)\s*(?:최종적으로\s*)?적용(?:한다|합니다)",
+        r"([0-9])(?:번)?(?:으로|로)\s*최종\s*분류",
+    )
+    return {int(m.group(1)) for p in patterns for m in re.finditer(p, reason, re.I)}
+
+
+def enforce_result_consistency(result: dict[str, Any], row: dict[str, str],
+                               prompt: str, args: argparse.Namespace) -> dict[str, Any]:
+    original = dict(result)
+    original_data = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", result["raw_response"].strip())) if result["raw_response"].strip().startswith("{") else {}
+    reason = str(original_data.get("reason", result["reason"]))
+    # Use the business title only; parent programs and quoted documents may mention unrelated R&D.
+    is_rnd = bool(re.search(r"[（(]\s*R\s*&\s*D\s*[)）]", clean_cell(row.get("세부사업명")), re.I))
+    target = 2 if is_rnd and result["label"] != 0 else result["label"]
+    adjustment = "관련 사업으로 판단된 명시적 R&D에 2 우선 규칙 적용" if target != result["label"] else ""
+    conclusions = explicit_reason_labels(reason)
+    conflict = bool(conclusions - {target})
+    result.update({"model_original_label": original["label"], "model_original_reason": reason,
+                   "model_original_response": original["raw_response"],
+                   "rule_adjustment_reason": adjustment, "consistency_check": "통과",
+                   "consistency_response": ""})
+    if not adjustment and not conflict:
+        return result
+    # One targeted recheck, independent of HTTP retries. Never change relevance based on a number in reason.
+    final_label = target
+    correction = ("\n\n[최종 일관성 검증]\n관련 R&D는 다른 기능보다 2를 우선한다. "
+                  f"코드가 확정한 label={final_label}을 유지하고 classification_status를 맞춰라. "
+                  "최초 답변의 모순을 해소하고 실제 입력에 근거한 최종 이유만 2문장 이내로 작성하라. "
+                  "원래 출력 형식의 완전한 JSON을 반환하라. 다른 레이블로 결론을 번복하지 마라.\n"
+                  + json.dumps({"previous_label": original["label"], "previous_reason": reason}, ensure_ascii=False))
+    try:
+        raw = call_vllm(prompt + correction, args)
+        result["consistency_response"] = raw
+        checked = parse_jsonish_response(raw)
+        full_reason = str(json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())).get("reason", ""))
+        if checked["label"] != final_label or explicit_reason_labels(full_reason) - {final_label}:
+            raise ValueError("재검증 응답의 레이블·근거 모순 지속")
+        for field in ("reason", "evidence", "confidence"):
+            result[field] = checked[field]
+        result["review_needed"] = original["review_needed"] or checked["review_needed"]
+        result["review_reason"] = "; ".join(filter(None, [original["review_reason"], checked["review_reason"]]))
+        result["consistency_check"] = "재검증 통과"
+    except (ValueError, OSError, TimeoutError, RemoteDisconnected) as exc:
+        if isinstance(exc, VLLMResponseError):
+            result["consistency_response"] = exc.raw_response
+        result["consistency_check"] = "재검증 미해결"
+        result["review_needed"] = True
+        result["review_reason"] = (original["review_reason"] + "; 근거 재검증 필요: " + str(exc))[:500]
+        result["reason"] = ("모델이 관련으로 판단한 R&D 사업에 코드의 2 우선 규칙을 적용함. 상세 근거 재검증 필요."
+                            if adjustment else "최초 모델의 숫자 분류를 유지했으나 근거와의 모순을 해결하지 못함. 별도 검토 필요.")
+        result["confidence"] = 0.0
+    result["label"] = final_label
+    result["classification_status"] = "무관" if final_label == 0 else "관련"
+    result["검토필요"] = "검토 필요" if result["review_needed"] else ""
+    return result
+
+
+CACHE_FIELDS = (
+    *PROVENANCE_FIELDS,
+    "key_hash",
+    "label",
+    "classification_status",
+    "confidence",
+    "reason",
+    "evidence",
+    "model",
+    "prompt_version",
+    "input_text",
+    "document_status",
+    "document_path",
+    "document_chars",
+    "raw_response",
+    "updated_at",
+    "review_needed", "review_reason", "검토필요",
+)
+EXCLUDED_CSV_COLUMNS = frozenset({
+    "사업설명자료_파일명",
+    "사업설명자료_상대경로",
+    "사업설명자료_절대경로",
+    "문서매칭상태",
+    "문서매칭방식",
+    "문서매칭후보수",
+    "document_status",
+    "document_path",
+    "document_chars",
+})
+EXTRA_OUTPUT_COLUMNS = (
+    *PROVENANCE_FIELDS,
+    "classification_status",
+    "confidence", "reason", "evidence",
+    "document_status", "document_path", "document_chars",
+    "review_needed", "review_reason", "검토필요",
+)
+
+
+def parse_args() -> argparse.Namespace:
+    project_dir = Path(__file__).resolve().parents[2]
+    parser = argparse.ArgumentParser(
+        description="예산 사업을 VLLM로 BIOFIN 1차 카테고리 0~9로 분류합니다."
+    )
+    parser.add_argument(
+        "--input-file", type=Path, default=project_dir / DEFAULT_INPUT_FILE
+    )
+    parser.add_argument("--output-dir", type=Path, default=project_dir / "outputs/llm/v1_vllm_v2")
+    parser.add_argument("--output-file", type=Path, default=None)
+    parser.add_argument("--cache-csv", type=Path, default=None)
+    parser.add_argument("--audit-csv", type=Path, default=None)
+    parser.add_argument("--review-csv", type=Path, default=None)
+    parser.add_argument("--label-col", default=DEFAULT_LABEL_COLUMN)
+    parser.add_argument(
+        "--target-ministries", nargs=11, default=TARGET_MINISTRIES,
+        help="LLM으로 분류할 소관명 11개. 나머지 소관기관은 LLM 호출 없이 0 처리",
+    )
+    parser.add_argument(
+        "--gold-label-col",
+        default=None,
+        help="정확도 평가용 정답 컬럼. 생략 시 알려진 컬럼명을 자동 탐색",
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--vllm-url", "--ollama-url", dest="vllm_url", default=DEFAULT_VLLM_URL,
+        help="vLLM 서버 주소. /v1 포함 또는 생략 가능. --ollama-url은 호환 별칭",
+    )
+    parser.add_argument(
+        "--doc-dir",
+        type=Path,
+        default=project_dir / "document/2023/사업설명자료",
+        help="사업설명자료 파일 폴더",
+    )
+    parser.add_argument(
+        "--max-document-chars",
+        type=int,
+        default=16000,
+        help="프롬프트에 포함할 사업목적·법적 근거 최대 문자 수",
+    )
+    parser.add_argument(
+        "--no-document-text",
+        action="store_true",
+        help="사업설명자료를 읽지 않고 예산 메타데이터만 사용",
+    )
+    parser.add_argument(
+        "--num-ctx", type=int, default=None,
+        help="기존 명령 호환용. vLLM 문맥 한도는 서버에서 설정하며 이 옵션은 무시",
+    )
+    parser.add_argument("--max-tokens", type=int, default=2048, help="응답 최대 토큰 수")
+    parser.add_argument(
+        "--enable-thinking", action="store_true",
+        help="Qwen thinking 활성화. 기본값은 비활성화",
+    )
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--retries", type=int, default=1)
+    parser.add_argument("--retry-delay", type=float, default=1.0)
+    parser.add_argument("--delay", type=float, default=0.0)
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=1,
+        help="완료 N건마다 캐시 저장. 기본값 1은 중단 시 완료 결과를 모두 보존",
+    )
+    parser.add_argument("--review-threshold", type=float, default=0.7)
+    parser.add_argument("--limit-keys", type=int, default=0)
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-json-format", action="store_true")
+    return parser.parse_args()
+
+
+def set_default_paths(args: argparse.Namespace) -> None:
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.output_file is None:
+        args.output_file = args.output_dir / f"{args.input_file.stem}_llm_classified.csv"
+    if args.cache_csv is None:
+        args.cache_csv = args.output_dir / "category_label_cache.csv"
+    if args.audit_csv is None:
+        args.audit_csv = args.output_dir / "category_label_audit.csv"
+    if args.review_csv is None:
+        args.review_csv = args.output_dir / "review_needed.csv"
+
+
+def clean_cell(value: Any) -> str:
+    return re.sub(r"\s+", " ", str("" if value is None else value).strip())
+
+
+def resolve_gold_label_column(headers: list[str], requested: str | None) -> str:
+    if requested is not None:
+        if requested not in headers:
+            raise ValueError(f"지정한 정답 컬럼이 없습니다: {requested}")
+        return requested
+    candidates = [
+        name for name in (DEFAULT_GOLD_LABEL_COLUMN, "1차 카테고리", "1차")
+        if name in headers
+    ]
+    if len(candidates) > 1:
+        raise ValueError(
+            f"정답 컬럼 후보가 여러 개입니다: {candidates}. --gold-label-col로 지정하세요."
+        )
+    if candidates:
+        return candidates[0]
+    print("정답 컬럼 없음: 예측은 진행하지만 정확도 평가는 할 수 없습니다.")
+    return DEFAULT_GOLD_LABEL_COLUMN
+
+
+def read_csv(path: Path) -> tuple[list[str], list[dict[str, str]], str]:
+    last_error: Exception | None = None
+    for encoding in ENCODINGS:
+        try:
+            with path.open("r", encoding=encoding, newline="") as file:
+                # 편집기가 .csv를 탭 구분 텍스트로 다시 저장한 경우도 읽는다.
+                header_line = file.readline()
+                delimiter = "\t" if "\t" in header_line else ","
+                file.seek(0)
+                reader = csv.DictReader(file, delimiter=delimiter)
+                if not reader.fieldnames:
+                    raise ValueError("CSV 헤더가 없습니다.")
+                rows = [dict(row) for row in reader]
+                if any(None in row or any(value is None for value in row.values()) for row in rows):
+                    raise ValueError(f"CSV 컬럼 수가 헤더와 다릅니다: {path}")
+                return list(reader.fieldnames), rows, encoding
+        except UnicodeError as exc:
+            last_error = exc
+    raise RuntimeError(f"CSV를 읽을 수 없습니다: {path}") from last_error
+
+
+def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
+    # 문서 메타데이터는 분류에만 사용하고 CSV에는 저장하지 않습니다.
+    fieldnames = [name for name in fieldnames if name not in EXCLUDED_CSV_COLUMNS]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def build_key(row: dict[str, str]) -> str:
+    business_key = clean_cell(row.get("business_key"))
+    if business_key:
+        return f"business_key:{business_key}"
+    return "␟".join(clean_cell(row.get(column)) for column in KEY_COLUMNS)
+
+
+def hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+
+
+def prompt_values(row: dict[str, str]) -> dict[str, str]:
+    columns = (
+        "소관명",
+        "회계명",
+        "계정명",
+        "분야명",
+        "부문명",
+        "프로그램명",
+        "단위사업명",
+        "세부사업명",
+    )
+    return {column: clean_cell(row.get(column)) for column in columns}
+
+
+def build_input_text(row: dict[str, str]) -> str:
+    values = prompt_values(row)
+    return " | ".join(f"{key}: {value}" for key, value in values.items() if value)
+
+
+def build_prompt(row: dict[str, str], document_text: str) -> str:
+    return PROMPT_TEMPLATE.format(
+        classification_prompt=SYSTEM_PROMPT.strip(),
+        document_text=document_text,
+        **prompt_values(row),
+    ).strip()
+
+
+def resolve_document_path(row: dict[str, str], args: argparse.Namespace) -> Path | None:
+    """CSV의 절대·상대경로와 파일명을 이용해 실제 사업설명자료를 찾습니다."""
+    project_dir = Path(__file__).resolve().parents[2]
+    candidates: list[Path] = []
+    absolute = clean_cell(row.get("사업설명자료_절대경로"))
+    relative = clean_cell(row.get("사업설명자료_상대경로"))
+    filename = clean_cell(row.get("사업설명자료_파일명"))
+    if absolute:
+        candidates.append(Path(absolute))
+    if relative:
+        candidates.extend(
+            [
+                args.input_file.parent / relative,
+                project_dir / "document/2023" / relative,
+                args.doc_dir.parent / relative,
+            ]
+        )
+    if filename:
+        candidates.append(args.doc_dir / filename)
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            # 다른 OS에서 생성된 절대경로, 너무 긴 경로, 접근 불가 경로는
+            # 무시하고 상대경로/파일명 후보를 계속 확인합니다.
+            continue
+    return None
+
+
+def truncate_document(text: str, max_chars: int) -> str:
+    """긴 문서는 앞부분과 뒷부분을 함께 남겨 프롬프트 크기를 제한합니다."""
+    if len(text) <= max_chars:
+        return text
+    head = int(max_chars * 0.7)
+    tail = max_chars - head
+    return (
+        text[:head]
+        + "\n\n[... 문서 중간 부분 생략 ...]\n\n"
+        + text[-tail:]
+    )
+
+
+def load_document_for_prompt(
+    row: dict[str, str], args: argparse.Namespace
+) -> tuple[str, str, str, int]:
+    if args.no_document_text:
+        return "[사업설명자료 사용 안 함]", "DISABLED", "", 0
+    path = resolve_document_path(row, args)
+    if path is None:
+        return "[사업설명자료 파일을 찾지 못함]", "NOT_FOUND", "", 0
+    try:
+        full_text = extract_document(path)
+        purpose = extract_business_purpose(full_text)
+        legal_basis = extract_legal_basis(full_text)
+        if not purpose and not legal_basis:
+            return (
+                "[사업목적·법적 근거 항목 또는 종료 경계를 찾지 못함. 문서 본문 미사용]",
+                "PURPOSE_NOT_FOUND", str(path), 0,
+            )
+        # 두 항목이 길어도 법적 근거가 목적 뒤에서 전부 잘리지 않게 배분한다.
+        if purpose and legal_basis:
+            separator = "\n\n[법적 근거(5번 판정 전용)]\n"
+            budget = max(0, args.max_document_chars - len(separator))
+            legal_limit = min(len(legal_basis), budget // 3)
+            purpose_text = purpose[:budget - legal_limit]
+            legal_limit = budget - len(purpose_text)
+            prompt_text = (purpose_text + separator + legal_basis[:legal_limit])[:args.max_document_chars]
+        elif legal_basis:
+            prompt_text = ("[사업목적 미발견]\n[법적 근거(5번 판정 전용)]\n" + legal_basis)[:args.max_document_chars]
+        else:
+            prompt_text = purpose[:args.max_document_chars]
+        status = "PURPOSE_EXTRACTED" if purpose else "LEGAL_BASIS_EXTRACTED"
+        return prompt_text, status, str(path), len(prompt_text)
+    except (DocumentParseError, RuntimeError, OSError) as exc:
+        return (
+            f"[사업설명자료 파싱 실패: {clean_cell(exc)[:300]}]",
+            "PARSE_FAILED",
+            str(path),
+            0,
+        )
+
+
+def parse_jsonish_response(text: str) -> dict[str, Any]:
+    if not text.strip():
+        raise ValueError("LLM 최종 응답이 비어 있습니다.")
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if not match:
+            raise ValueError("응답에 유효한 JSON 객체가 없습니다.")
+        else:
+            data = json.loads(match.group(0))
+
+    if not isinstance(data, dict):
+        raise ValueError("LLM 응답이 JSON 객체가 아닙니다.")
+    value = data.get("label")
+    status = clean_cell(data.get("classification_status"))
+    if type(value) is not int or value not in VALID_LABELS:
+        raise ValueError(f"label은 0~9 정수여야 합니다: {value!r}")
+    label = value
+    expected_status = "무관" if label == 0 else "관련"
+    if status and status != expected_status:
+        raise ValueError("classification_status와 label이 일치하지 않습니다.")
+    status = expected_status
+    review_needed = data.get("review_needed", False)
+    if not isinstance(review_needed, bool):
+        raise ValueError("review_needed는 JSON boolean이어야 합니다.")
+    review_reason = clean_cell(data.get("review_reason"))[:500]
+    if review_needed and not review_reason:
+        raise ValueError("검토가 필요한 응답은 review_reason을 제공해야 합니다.")
+    if not review_needed and review_reason:
+        raise ValueError("검토가 불필요한 응답의 review_reason은 빈 문자열이어야 합니다.")
+
+    try:
+        confidence = float(data.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    return {
+        "label": label,
+        "classification_status": status,
+        "confidence": max(0.0, min(1.0, confidence)),
+        "reason": strip_reason_prefix(clean_cell(data.get("reason")))[:500],
+        "evidence": clean_cell(data.get("evidence"))[:500],
+        "review_needed": review_needed,
+        "review_reason": review_reason,
+        "검토필요": "검토 필요" if review_needed else "",
+        "raw_response": text,
+    }
+
+
+class VLLMResponseError(ValueError):
+    def __init__(self, message: str, raw_response: str) -> None:
+        super().__init__(message)
+        self.raw_response = raw_response
+
+
+def call_vllm(prompt: str, args: argparse.Namespace) -> str:
+    base_url = args.vllm_url.rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url += "/v1"
+    payload: dict[str, Any] = {
+        "model": args.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "temperature": 0,
+        "top_p": 0.1,
+        "max_tokens": args.max_tokens,
+        "chat_template_kwargs": {"enable_thinking": args.enable_thinking},
+    }
+    if not args.no_json_format:
+        payload["response_format"] = {"type": "json_object"}
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("VLLM_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = request.Request(
+        f"{base_url}/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=args.timeout) as response:
+            raw_body = response.read().decode("utf-8")
+    except HTTPError as exc:
+        raw_body = exc.read().decode("utf-8", errors="replace")
+        raise VLLMResponseError(
+            f"vLLM HTTP {exc.code}: {raw_body[:2000]}", raw_body
+        ) from exc
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise VLLMResponseError("vLLM HTTP 응답이 JSON이 아닙니다.", raw_body) from exc
+    if not isinstance(body, dict):
+        raise VLLMResponseError("vLLM HTTP 응답이 JSON 객체가 아닙니다.", raw_body)
+    if body.get("error"):
+        raise VLLMResponseError(f"vLLM 서버 오류: {body['error']}", raw_body)
+    try:
+        choice = body["choices"][0]
+        text = choice["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise VLLMResponseError("vLLM 응답에서 답변을 찾지 못했습니다.", raw_body) from exc
+    if choice.get("finish_reason") == "length":
+        raise VLLMResponseError(
+            "응답이 토큰 한도로 잘렸습니다. 서버 문맥 한도를 확인하고 "
+            "--max-tokens를 늘리세요.", raw_body,
+        )
+    if not isinstance(text, str) or not text.strip():
+        raise VLLMResponseError("vLLM 최종 답변이 없거나 비어 있습니다.", raw_body)
+    return text
+
+
+def classify(row: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
+    document_text, document_status, document_path, document_chars = (
+        load_document_for_prompt(row, args)
+    )
+    prompt = build_prompt(row, document_text) + "\n관련성이 인정된 R&D는 최종 label=2를 우선한다. reason은 최종 label과 일치하는 근거만 2문장 이내로 작성한다. 다른 카테고리를 비교하더라도 최종 결론을 번복하지 않는다."
+    last_error: Exception | None = None
+    raw_response = ""
+    for attempt in range(args.retries + 1):
+        try:
+            raw_response = ""
+            raw_response = call_vllm(prompt, args)
+            result = parse_jsonish_response(raw_response)
+            result = enforce_result_consistency(result, row, prompt, args)
+            result.update(
+                {
+                    "document_status": document_status,
+                    "document_path": document_path,
+                    "document_chars": document_chars,
+                }
+            )
+            if args.delay > 0:
+                time.sleep(args.delay)
+            return result
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            RemoteDisconnected,
+            ConnectionError,
+            OSError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
+            last_error = exc
+            if isinstance(exc, VLLMResponseError):
+                raw_response = exc.raw_response
+            if attempt < args.retries:
+                time.sleep(args.retry_delay)
+    return {
+        "label": "",
+        "classification_status": "실패",
+        "review_needed": True,
+        "review_reason": f"분류 실패: {last_error}",
+        "검토필요": "검토 필요",
+        "confidence": 0.0,
+        "reason": f"분류 실패: {last_error}",
+        "evidence": "",
+        "document_status": document_status,
+        "document_path": document_path,
+        "document_chars": document_chars,
+        "raw_response": raw_response,
+    }
+
+
+def load_cache(path: Path) -> dict[str, dict[str, str]]:
+    if not path.exists():
+        return {}
+    _, rows, _ = read_csv(path)
+    return {row["key_hash"]: row for row in rows if row.get("key_hash")}
+
+
+def save_cache(path: Path, cache: dict[str, dict[str, Any]]) -> None:
+    """캐시를 임시 파일에 먼저 쓴 뒤 교체해 중단 시 파일 손상을 방지합니다."""
+    temporary_path = path.with_name(f"{path.name}.tmp")
+    write_csv(
+        temporary_path,
+        list(CACHE_FIELDS),
+        [cache[key] for key in sorted(cache)],
+    )
+    temporary_path.replace(path)
+
+
+def collect_items(
+    rows: list[dict[str, str]],
+) -> dict[str, dict[str, Any]]:
+    items: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key_hash = hash_key(build_key(row))
+        if key_hash not in items:
+            items[key_hash] = {
+                "row": row,
+                "input_text": build_input_text(row),
+                "row_count": 0,
+            }
+        items[key_hash]["row_count"] += 1
+    return items
+
+
+def print_document_match_summary(
+    rows: list[dict[str, str]], args: argparse.Namespace
+) -> None:
+    """LLM 호출 전에 실제 사업설명자료 파일 연결 여부를 점검합니다."""
+    if args.no_document_text:
+        print("사업설명자료: 사용 안 함(--no-document-text)")
+        return
+    resolved = 0
+    missing = 0
+    matched_rows = 0
+    matched_but_missing = 0
+    for row in rows:
+        declared_matched = clean_cell(row.get("문서매칭상태")).upper() == "MATCHED"
+        if declared_matched:
+            matched_rows += 1
+        if resolve_document_path(row, args) is not None:
+            resolved += 1
+        else:
+            missing += 1
+            if declared_matched:
+                matched_but_missing += 1
+    print(f"사업설명자료 실제 연결: {resolved:,}건 / 미발견: {missing:,}건")
+    print(
+        f"CSV상 MATCHED: {matched_rows:,}건 / "
+        f"MATCHED지만 실제 파일 미발견: {matched_but_missing:,}건"
+    )
+    print(f"사업설명자료 탐색 폴더: {args.doc_dir}")
+
+
+def valid_cached_label(record: dict[str, Any] | None) -> bool:
+    if not record:
+        return False
+    # 새 캐시에는 문서 상태를 저장하지 않으므로, 기존 캐시에 있을 때만 검사합니다.
+    if "document_status" in record and record["document_status"] not in {
+        "PURPOSE_EXTRACTED", "LEGAL_BASIS_EXTRACTED", "PURPOSE_NOT_FOUND", "NOT_FOUND", "PARSE_FAILED", "DISABLED"
+    }:
+        return False
+    if record.get("prompt_version") != PROMPT_VERSION:
+        return False
+    status = record.get("classification_status")
+    label = parse_valid_label(record.get("label"))
+    return label is not None and status == ("무관" if label == 0 else "관련")
+
+
+def parse_valid_label(value: Any) -> int | None:
+    """값을 0~9 정수 라벨로 변환하며 유효하지 않으면 None을 반환합니다."""
+    text = clean_cell(value)
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    if not number.is_integer():
+        return None
+    label = int(number)
+    return label if label in VALID_LABELS else None
+
+
+def evaluate_predictions(
+    rows: list[dict[str, Any]],
+    gold_column: str,
+    pred_column: str,
+    output_dir: Path,
+) -> dict[str, Any] | None:
+    """정답과 예측을 비교해 정확도·클래스별 지표·혼동행렬을 저장합니다."""
+    evaluated: list[tuple[int, int, dict[str, Any]]] = []
+    skipped_missing_gold = 0
+    skipped_missing_prediction = 0
+    skipped_review_needed = 0
+
+    for row in rows:
+        gold = parse_valid_label(row.get(gold_column))
+        pred = parse_valid_label(row.get(pred_column))
+        if gold is None:
+            skipped_missing_gold += 1
+            continue
+        if row.get("classification_status") == "검토 필요":
+            skipped_review_needed += 1
+            continue
+        if pred is None:
+            skipped_missing_prediction += 1
+            continue
+        evaluated.append((gold, pred, row))
+
+    if not evaluated:
+        print(
+            f"정확도 평가 생략: '{gold_column}'과 유효한 예측이 함께 있는 행이 없습니다."
+        )
+        return None
+
+    matrix = [[0 for _ in range(10)] for _ in range(10)]
+    incorrect_rows: list[dict[str, Any]] = []
+    correct = 0
+    for gold, pred, row in evaluated:
+        matrix[gold][pred] += 1
+        if gold == pred:
+            correct += 1
+        else:
+            incorrect_rows.append(
+                {
+                    "gold_label": gold,
+                    "pred_label": pred,
+                    "confidence": row.get("confidence", ""),
+                    "reason": row.get("reason", ""),
+                    "evidence": row.get("evidence", ""),
+                    "소관명": row.get("소관명", ""),
+                    "프로그램명": row.get("프로그램명", ""),
+                    "단위사업명": row.get("단위사업명", ""),
+                    "세부사업명": row.get("세부사업명", ""),
+                    "business_key": row.get("business_key", ""),
+                }
+            )
+
+    per_class: dict[str, dict[str, Any]] = {}
+    macro_precision = 0.0
+    macro_recall = 0.0
+    macro_f1 = 0.0
+    for label in range(10):
+        tp = matrix[label][label]
+        support = sum(matrix[label])
+        predicted = sum(matrix[gold][label] for gold in range(10))
+        precision = tp / predicted if predicted else 0.0
+        recall = tp / support if support else 0.0
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if precision + recall
+            else 0.0
+        )
+        per_class[str(label)] = {
+            "precision": round(precision, 6),
+            "recall": round(recall, 6),
+            "f1": round(f1, 6),
+            "support": support,
+            "predicted": predicted,
+        }
+        macro_precision += precision
+        macro_recall += recall
+        macro_f1 += f1
+
+    total = len(evaluated)
+    metrics = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "backend": "vllm",
+        "gold_label_column": gold_column,
+        "prediction_column": pred_column,
+        "evaluated_rows": total,
+        "correct_rows": correct,
+        "incorrect_rows": total - correct,
+        "accuracy": round(correct / total, 6),
+        "macro_precision": round(macro_precision / 10, 6),
+        "macro_recall": round(macro_recall / 10, 6),
+        "macro_f1": round(macro_f1 / 10, 6),
+        "skipped_missing_gold": skipped_missing_gold,
+        "skipped_missing_prediction": skipped_missing_prediction,
+        "skipped_review_needed": skipped_review_needed,
+        "per_class": per_class,
+    }
+    metrics_path = output_dir / "evaluation_metrics.json"
+    metrics_path.write_text(
+        json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    confusion_rows = []
+    for gold in range(10):
+        confusion_rows.append(
+            {
+                "gold_label": gold,
+                **{f"pred_{pred}": matrix[gold][pred] for pred in range(10)},
+            }
+        )
+    write_csv(
+        output_dir / "confusion_matrix.csv",
+        ["gold_label", *[f"pred_{label}" for label in range(10)]],
+        confusion_rows,
+    )
+    write_csv(
+        output_dir / "incorrect_predictions.csv",
+        [
+            "gold_label",
+            "pred_label",
+            "confidence",
+            "reason",
+            "evidence",
+            "소관명",
+            "프로그램명",
+            "단위사업명",
+            "세부사업명",
+            "business_key",
+        ],
+        incorrect_rows,
+    )
+    print(
+        f"정확도: {metrics['accuracy']:.4f} "
+        f"({correct:,}/{total:,}), macro F1: {metrics['macro_f1']:.4f}"
+    )
+    print(f"평가 지표: {metrics_path}")
+    return metrics
+
+
+LOCAL_TARGET_FIELDS = (
+    "농림해양수산", "문화및관광", "산업ㆍ중소기업및에너지", "일반공공행정",
+    "환경", "국토및지역개발", "보건",
+)
+
+
+def normalize_field(value: str) -> str:
+    return "".join(clean_cell(value).split()).replace("ㆍ", "·")
+
+
+def detect_fiscal_type(headers: list[str], rows: list[dict[str, str]]) -> str:
+    local_columns = {"지방자치단체코드", "시도코드", "시도명"}.intersection(headers)
+    if local_columns:
+        if not rows or all(any(clean_cell(row.get(c)) for c in local_columns) for row in rows):
+            return "local"
+        raise ValueError("지방 식별 열에 값이 없는 행이 있습니다. 중앙·지방 혼합 또는 누락 데이터를 확인하세요.")
+    if {"소관명", "분야명"}.issubset(headers):
+        return "central"
+    raise ValueError("중앙·지방 자동 판별에 필요한 열이 없습니다.")
+
+
+def filter_rule(args: argparse.Namespace) -> tuple[str, frozenset[str]]:
+    if getattr(args, "fiscal_type", "central") == "local":
+        return "분야명", frozenset(normalize_field(value) for value in LOCAL_TARGET_FIELDS)
+    return "소관명", frozenset(clean_cell(value) for value in getattr(args, "target_ministries", TARGET_MINISTRIES))
+
+
+def filter_value(row: dict[str, str], column: str) -> str:
+    return normalize_field(row.get(column, "")) if column == "분야명" else clean_cell(row.get(column))
+
+
+def prepare_ministry_labels(
+    items: dict[str, dict[str, Any]],
+    cache: dict[str, dict[str, Any]],
+    args: argparse.Namespace,
+) -> dict[str, dict[str, Any]]:
+    column, targets = filter_rule(args)
+    selected = []
+    for key_hash, item in items.items():
+        field = filter_value(item["row"], column)
+        if field in targets:
+            # 과거 정책 결과는 LLM 캐시로 재사용하지 않는다.
+            if cache.get(key_hash, {}).get("model") in {"ministry-filter", "field-filter"}:
+                cache.pop(key_hash)
+            selected.append((key_hash, item))
+        else:
+            # --limit-keys 및 기존 캐시와 무관하게 모든 비대상 행을 0으로 고정.
+            cache[key_hash] = {
+                "key_hash": key_hash, "label": 0, "classification_status": "무관",
+                "review_needed": False, "review_reason": "", "검토필요": "",
+                "confidence": "1.000", "reason": "",  # LLM 미호출 행은 모델 근거가 없으므로 비워 둔다.
+                "evidence": "[]", "model": "ministry-filter", "prompt_version": PROMPT_VERSION,
+                "input_text": item["input_text"], "document_status": "DISABLED",
+                "document_path": "", "document_chars": 0, "raw_response": "",
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+    print(f"{column} 필터: LLM 대상 {len(selected):,}개 / 자동 0 {len(items) - len(selected):,}개")
+    return dict(selected)
+
+
+def classify_items(
+    items: dict[str, dict[str, Any]],
+    cache: dict[str, dict[str, Any]],
+    args: argparse.Namespace,
+) -> None:
+    started_at = getattr(args, "started_at", time.monotonic())
+    selected = list(prepare_ministry_labels(items, cache, args).items())
+    if args.limit_keys > 0:
+        selected = selected[: args.limit_keys]
+    pending = [
+        (key_hash, item)
+        for key_hash, item in selected
+        if args.overwrite or not valid_cached_label(cache.get(key_hash))
+    ]
+    print(f"LLM 분류 대상: {len(pending):,}개 (workers={args.workers})")
+
+    lock = threading.Lock()
+    completed = 0
+
+    def process(key_hash: str, item: dict[str, Any]) -> None:
+        nonlocal completed
+        result = classify(item["row"], args)
+        record = {
+            "key_hash": key_hash,
+            "label": result["label"],
+            "classification_status": result["classification_status"],
+            "review_needed": result["review_needed"],
+            "review_reason": result["review_reason"],
+            "검토필요": result["검토필요"],
+            "confidence": f"{float(result['confidence']):.3f}",
+            "reason": result["reason"],
+            "evidence": result["evidence"],
+            "model": args.model,
+            "prompt_version": PROMPT_VERSION,
+            "input_text": item["input_text"],
+            "document_status": result["document_status"],
+            "document_path": result["document_path"],
+            "document_chars": result["document_chars"],
+            "raw_response": result["raw_response"],
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        record.update({field: result.get(field, "") for field in PROVENANCE_FIELDS})
+        with lock:
+            cache[key_hash] = record
+            completed += 1
+            elapsed = max(0, int(time.monotonic() - started_at))
+            hours, remainder = divmod(elapsed, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            print(
+                f"[경과 {hours:02d}:{minutes:02d}:{seconds:02d}] "
+                f"[{completed:,}/{len(pending):,}] "
+                f"label={record['label']} conf={record['confidence']} "
+                f"{item['input_text'][:70]}"
+            )
+            if not valid_cached_label(record):
+                print(f"  {record['reason']}", file=sys.stderr, flush=True)
+            if args.save_every > 0 and completed % args.save_every == 0:
+                save_cache(args.cache_csv, cache)
+
+    executor = ThreadPoolExecutor(max_workers=max(1, args.workers))
+    futures = [executor.submit(process, key_hash, item) for key_hash, item in pending]
+    try:
+        for future in as_completed(futures):
+            future.result()
+    except KeyboardInterrupt:
+        for future in futures:
+            future.cancel()
+        print("\n중단됨: 현재 캐시를 저장합니다.", file=sys.stderr)
+        save_cache(args.cache_csv, cache)
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+        save_cache(args.cache_csv, cache)
+
+
+def write_outputs(
+    headers: list[str],
+    rows: list[dict[str, str]],
+    items: dict[str, dict[str, Any]],
+    cache: dict[str, dict[str, Any]],
+    args: argparse.Namespace,
+    *, preliminary: bool = False,
+) -> None:
+    excluded = {args.label_col, *EXTRA_OUTPUT_COLUMNS}
+    output_headers = [
+        column for column in headers if column not in excluded
+    ] + [args.label_col, *EXTRA_OUTPUT_COLUMNS]
+
+    output_headers = [c for c in output_headers if c not in EXCLUDED_CSV_COLUMNS]
+    output_headers.remove("classification_status")
+    output_headers.insert(min(22, len(output_headers) - 1), "classification_status")
+
+    output_rows: list[dict[str, Any]] = []
+    for row in rows:
+        result = dict(row)
+        cached = cache.get(hash_key(build_key(row)), {})
+        result[args.label_col] = cached.get("label", "")
+        for column in EXTRA_OUTPUT_COLUMNS:
+            result[column] = cached.get(column, "")
+        output_rows.append(result)
+    write_csv(args.output_file, output_headers, output_rows)
+    if preliminary:
+        return
+    evaluation = evaluate_predictions(
+        output_rows,
+        args.gold_label_col,
+        args.label_col,
+        args.output_dir,
+    )
+
+    audit_rows: list[dict[str, Any]] = []
+    review_rows: list[dict[str, Any]] = []
+    for key_hash, item in items.items():
+        cached = cache.get(key_hash, {})
+        audit = {
+            "key_hash": key_hash,
+            "row_count": item["row_count"],
+            "label": cached.get("label", ""),
+            "classification_status": cached.get("classification_status", ""),
+            "review_needed": cached.get("review_needed", ""),
+            "review_reason": cached.get("review_reason", ""),
+            "검토필요": cached.get("검토필요", ""),
+            "confidence": cached.get("confidence", ""),
+            "reason": strip_reason_prefix(cached.get("reason", "")),
+            "evidence": cached.get("evidence", ""),
+            "input_text": item["input_text"],
+            "document_status": cached.get("document_status", ""),
+            "document_path": cached.get("document_path", ""),
+            "document_chars": cached.get("document_chars", ""),
+            "raw_response": cached.get("raw_response", ""),
+        }
+        audit.update({field: cached.get(field, "") for field in PROVENANCE_FIELDS})
+        audit_rows.append(audit)
+        try:
+            confidence = float(audit["confidence"])
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if (not valid_cached_label(cached)
+                or clean_cell(cached.get("review_needed")).lower() == "true"
+                or confidence < args.review_threshold):
+            review_rows.append(audit)
+
+    audit_headers = [
+        *PROVENANCE_FIELDS,
+        "key_hash", "row_count", "label", "classification_status", "confidence",
+        "reason", "evidence", "input_text", "document_status",
+        "document_path", "document_chars", "raw_response",
+        "review_needed", "review_reason", "검토필요",
+    ]
+    write_csv(args.audit_csv, audit_headers, audit_rows)
+    write_csv(args.review_csv, audit_headers, review_rows)
+
+    counts = Counter(str(row.get("label", "")) for row in cache.values())
+    summary = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "backend": "vllm",
+        "max_tokens": args.max_tokens,
+        "enable_thinking": args.enable_thinking,
+        "model": args.model,
+        "prompt_version": PROMPT_VERSION,
+        "input_file": str(args.input_file),
+        "input_rows": len(rows),
+        "fiscal_type": getattr(args, "fiscal_type", "central"),
+        "filter_column": filter_rule(args)[0],
+        "target_local_fields": list(LOCAL_TARGET_FIELDS),
+        "target_ministries": list(getattr(args, "target_ministries", TARGET_MINISTRIES)),
+        "ministry_filter_zero_rows": sum(
+            cache.get(hash_key(build_key(row)), {}).get("model") == "ministry-filter"
+            for row in rows
+        ),
+        "unique_businesses": len(items),
+        "label_counts_in_cache": dict(sorted(counts.items())),
+        "classification_status_counts": dict(Counter(
+            row.get("classification_status", "") for row in cache.values()
+        )),
+        "output_file": str(args.output_file),
+        "evaluation": evaluation,
+    }
+    summary_path = args.output_dir / "run_summary.json"
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"분류 결과: {args.output_file}")
+    print(f"검수 결과: {args.audit_csv}")
+    print(f"확인 필요: {args.review_csv} ({len(review_rows):,}건)")
+
+
+def main() -> int:
+    started_at = time.monotonic()
+    args = parse_args()
+    args.started_at = started_at
+    args.target_ministries = tuple(clean_cell(field) for field in args.target_ministries)
+    if len(set(args.target_ministries)) != 11 or any(not field for field in args.target_ministries):
+        raise ValueError("LLM 대상 소관명 11개를 TARGET_MINISTRIES 또는 --target-ministries로 지정하세요(중복·빈 값 불가).")
+    if args.max_document_chars < 1:
+        raise ValueError("--max-document-chars는 1 이상이어야 합니다.")
+    if args.max_tokens < 1:
+        raise ValueError("--max-tokens는 1 이상이어야 합니다.")
+    if args.num_ctx is not None:
+        print("안내: --num-ctx는 vLLM에 적용되지 않습니다. 문맥 한도는 서버 설정을 따릅니다.")
+    set_default_paths(args)
+    headers, rows, encoding = read_csv(args.input_file)
+    args.fiscal_type = detect_fiscal_type(headers, rows)
+    filter_column, filter_targets = filter_rule(args)
+    print(f"재정 유형 자동 판별: {args.fiscal_type} / {filter_column} 기준 {len(filter_targets)}개 대상")
+    if filter_column not in headers or any(not filter_value(row, filter_column) for row in rows):
+        raise ValueError(f"필터 기준 {filter_column} 값이 누락된 행이 있습니다.")
+    if "소관명" not in headers or any(not clean_cell(row.get("소관명")) for row in rows):
+        raise ValueError("소관명 컬럼과 모든 행의 소관명이 필요합니다. 누락값을 자동 0으로 처리하지 않습니다.")
+    # business_key가 서로 다른 소관기관에 중복되면 캐시/출력에서 분류가 섞일 수 있다.
+    key_ministries: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        key, field = build_key(row), (clean_cell(row["소관명"]), filter_value(row, filter_column))
+        if key in key_ministries and key_ministries[key] != field:
+            raise ValueError(f"서로 다른 소관기관에서 같은 사업 키가 발견되었습니다: {key}")
+        key_ministries[key] = field
+    args.gold_label_col = resolve_gold_label_column(headers, args.gold_label_col)
+    print(f"평가용 정답 컬럼: {args.gold_label_col}")
+    missing = [column for column in KEY_COLUMNS if column not in headers]
+    if missing and "business_key" not in headers:
+        raise ValueError(f"고유 사업 키 컬럼이 부족합니다: {', '.join(missing)}")
+
+    items = collect_items(rows)
+    print(f"입력: {args.input_file} ({len(rows):,}행, {encoding})")
+    print(f"고유 사업: {len(items):,}개")
+    target_rows = [row for row in rows if filter_value(row, filter_column) in filter_targets]
+    print(f"전체 {len(rows):,}행 / LLM 대상 {len(target_rows):,}행 / 자동 0 {len(rows) - len(target_rows):,}행")
+    if args.dry_run:
+        print_document_match_summary(target_rows, args)
+        print("--dry-run: VLLM 호출 및 파일 저장 없이 종료합니다.")
+        return 0
+
+    cache = load_cache(args.cache_csv)
+    cache = {key: record for key, record in cache.items() if key in items}
+    print(f"기존 캐시: {len(cache):,}개")
+    # Resolve non-target labels and persist the full-row snapshot BEFORE document checks/API calls.
+    llm_items = prepare_ministry_labels(items, cache, args)
+    zero_results = {key: cache[key] for key in items if key not in llm_items}
+    llm_cache = {key: record for key, record in cache.items() if key in llm_items}
+    # Do not rewrite thousands of deterministic zeros after every model response.
+    save_cache(args.cache_csv, llm_cache)
+    write_outputs(headers, rows, items, {**zero_results, **llm_cache}, args, preliminary=True)
+    print(f"자동 0 사전 저장 완료: {len(zero_results):,}개 사업 / {args.output_file}", flush=True)
+    try:
+        classify_items(llm_items, llm_cache, args)
+    finally:
+        write_outputs(headers, rows, items, {**zero_results, **llm_cache}, args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

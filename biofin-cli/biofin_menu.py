@@ -45,6 +45,12 @@ CONFIG = {
     # 5. 프로그램 파일 위치 (프로젝트 폴더를 기준으로 입력)
     "TRANSFORMER_SCRIPT_DIR": "transformer/v1/src", # Transformer 학습·예측 프로그램 폴더
     "LLM_SCRIPT_DIR": "llm/v1",            # LLM 분류 프로그램 폴더
+    # vLLM 분류 프롬프트 버전 목록: (메뉴에 보일 이름, LLM_SCRIPT_DIR 안의 파일 이름, 결과 폴더 이름 뒤에 붙일 글자)
+    # 첫 번째 항목이 Enter를 눌렀을 때의 기본값입니다.
+    "VLLM_SCRIPT_VERSIONS": [
+        ("V1 (기존 프롬프트)", "classify_biofin_category_with_vllm.py", ""),
+        ("V2 (분류지침 개정 2026.10.22 반영, 명시 요건 중심)", "classify_biofin_category_with_vllm_V2.py", "_v2"),
+    ],
     "LOCAL_CRAWLER_SCRIPT": "local_fiscal/crawl_business_docs.py", # 지방재정 자료 수집 프로그램
     "OPEN_FISCAL_CRAWLER_SCRIPT": "open_fiscal/crawl_business_docs.py", # 열린재정 자료 수집 프로그램
     "OPEN_FISCAL_API_SCRIPT": "open_fiscal/api_budget_list.py", # 열린재정 API 목록 수집 프로그램
@@ -322,6 +328,10 @@ def main():
     vllm = backend == 3
     if not transformer:
         print("안내: LLM은 실행 중인 서버 API로 분류합니다. 모델 학습이나 서버 기동은 하지 않습니다.")
+    version_suffix = ""
+    if vllm:
+        versions = CONFIG["VLLM_SCRIPT_VERSIONS"]
+        _, vllm_script, version_suffix = versions[choose("분류 프롬프트 버전", [label for label, _, _ in versions]) - 1]
     augmentation = None
     if transformer and training:
         augmentation = choose("학습 데이터 선택", ["원본만 사용", "원본 + 증강 통합 CSV 사용"])
@@ -339,7 +349,7 @@ def main():
         print("증강 학습에는 row_type, training_eligible 컬럼이 있는 UTF-8 통합 CSV를 선택해주세요.")
     doc_dir = project_path("사업설명자료 폴더", CONFIG["DOCUMENT_DIR"], root, "dir")
     family = "transformer" if transformer else "llm"
-    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + version_suffix
     output = project_path("결과 저장 폴더", f"{family}/{CONFIG['OUTPUT_SUBDIR']}/{stamp}", root, "output")
     if transformer:
         container = ask("Docker 컨테이너 이름", CONFIG["DOCKER_CONTAINER"])
@@ -367,7 +377,7 @@ def main():
         cmd += ["--output_dir", output]
         print("안내: 호스트 프로젝트와 컨테이너 내부 프로젝트의 파일 구성이 같아야 합니다.")
     else:
-        script = f"{CONFIG['LLM_SCRIPT_DIR']}/classify_biofin_category_with_{'vllm' if vllm else 'ollama'}.py"
+        script = f"{CONFIG['LLM_SCRIPT_DIR']}/{vllm_script if vllm else 'classify_biofin_category_with_ollama.py'}"
         if not hasattr(os, "getuid"):
             raise RuntimeError("LLM Docker 실행은 Linux에서 사용해주세요.")
         cmd = ["docker", "run", "--rm", "-it", "--network", CONFIG["LLM_DOCKER_NETWORK"], "--user", f"{os.getuid()}:{os.getgid()}",

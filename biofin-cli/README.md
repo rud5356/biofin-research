@@ -13,7 +13,7 @@ python3 biofin_menu.py
 
 Transformer 학습에서는 원본만 사용할지, 원본+증강 통합 CSV를 사용할지 선택합니다. 통합 CSV는 `build_merged_training_csv.py`로 만든 `row_type`, `training_eligible` 컬럼이 있는 UTF-8 파일입니다. 증강 전체 사용 또는 클래스별 최대 개수를 선택할 수 있습니다. 원본만 선택하면 `--augmentation_per_class 0`을 전달합니다. 증강 생성 작업은 실행하지 않습니다.
 
-vLLM은 KT Cloud 등에서 이미 기동한 모델에 API로 분류를 요청합니다. API URL, 모델 ID(`/v1/models`의 `id`), 사업목적 문자 수, 응답 토큰 수, 동시 요청 수, 타임아웃을 입력합니다. GPU 점유·최대 컨텍스트·서버 동시 시퀀스 설정은 변경하지 않습니다. 인증이 필요하면 호스트의 `VLLM_API_KEY` 환경변수가 컨테이너로 전달됩니다. 프로젝트에 `llm/v1/classify_biofin_category_with_vllm.py`가 있어야 합니다.
+vLLM은 KT Cloud 등에서 이미 기동한 모델에 API로 분류를 요청합니다. API URL, 모델 ID(`/v1/models`의 `id`), 사업목적 문자 수, 응답 토큰 수, 동시 요청 수, 타임아웃을 입력합니다. GPU 점유·최대 컨텍스트·서버 동시 시퀀스 설정은 변경하지 않습니다. 인증이 필요하면 호스트의 `VLLM_API_KEY` 환경변수가 컨테이너로 전달됩니다. vLLM을 고르면 분류 프롬프트 버전을 묻습니다. V1(기본값)은 `llm/v1/classify_biofin_category_with_vllm.py`, V2(분류지침 개정 2026.10.22 반영)는 `llm/v1/classify_biofin_category_with_vllm_V2.py`를 실행하며, 고른 파일이 프로젝트에 있어야 합니다. V2의 기본 결과 폴더 이름에는 `_v2`가 붙습니다. 버전 목록은 `CONFIG["VLLM_SCRIPT_VERSIONS"]`에서 바꿀 수 있습니다.
 
 - `0`: 상위 폴더로 이동
 - `s`: 현재 폴더 선택 (문서·모델·결과 폴더)
