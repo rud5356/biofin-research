@@ -1,5 +1,7 @@
 import contextlib
 import io
+import json
+import os
 from pathlib import Path
 import shlex
 import tempfile
@@ -8,6 +10,34 @@ import unittest.mock
 from unittest.mock import patch
 
 import biofin_menu as menu
+
+
+class ConfigTests(unittest.TestCase):
+    def test_default_config_is_independent_of_working_directory(self):
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as folder:
+            try:
+                os.chdir(folder)
+                self.assertEqual(menu.load_config(), menu.CONFIG)
+            finally:
+                os.chdir(original)
+
+    def test_load_custom_values_with_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config.json"
+            values = dict(menu.CONFIG, WORKERS=4, PROJECT_DIR=None)
+            path.write_text(json.dumps(values), encoding="utf-8-sig")
+            self.assertEqual(menu.load_config(path), values)
+
+    def test_missing_invalid_and_non_object_config(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config.json"
+            with self.assertRaises(ValueError):
+                menu.load_config(path)
+            for text in ['{"WORKERS":', '[]']:
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    menu.load_config(path)
 
 
 class MenuTests(unittest.TestCase):

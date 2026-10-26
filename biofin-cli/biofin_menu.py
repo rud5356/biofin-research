@@ -3,6 +3,7 @@
 import argparse
 import csv
 import datetime
+import json
 import os
 from pathlib import Path
 import shlex
@@ -10,58 +11,25 @@ import shutil
 import subprocess
 
 
-# ============================================================================
-# [사용 안내] 서버·모델·폴더가 바뀌면 아래 CONFIG 설정만 먼저 확인하세요.
-# 각 줄의 # 오른쪽은 설정의 뜻입니다. 따옴표 안의 값만 수정하면 됩니다.
-# 메뉴에서 Enter를 누르면 이 기본값이 사용되며, 실행할 때 다른 값을 입력할 수도 있습니다.
-# None은 별도 경로를 지정하지 않는다는 뜻입니다.
-# 비밀번호와 API 키의 실제 값은 코드에 적지 마세요.
-# ============================================================================
-CONFIG = {
-    # 1. 프로젝트 및 데이터 폴더
-    "PROJECT_DIR": None,                    # 서버의 프로젝트 폴더; None이면 현재 실행 폴더 사용
-    "CRAWLER_DIR": "crawlers",              # 예산자료 수집 프로그램이 들어 있는 폴더
-    "DOCUMENT_DIR": "document",            # 입력 CSV와 사업설명자료를 찾아볼 기본 폴더
-    "OUTPUT_SUBDIR": "v1/outputs",          # LLM·Transformer 결과를 저장할 하위 폴더
+# 실행 기본값은 같은 폴더의 config.json에서 관리합니다.
+CONFIG_PATH = Path(__file__).resolve().with_name("config.json")
 
-    # 2. Docker 컨테이너 설정 (Transformer·크롤러)
-    "DOCKER_CONTAINER": "biofin",          # 이미 실행 중인 Docker 컨테이너 이름
-    "DOCKER_WORKDIR": "/work/biofin_cls3",  # Docker 컨테이너 안의 프로젝트 폴더 위치
 
-    # 3. LLM용 Docker 설정
-    "LLM_DOCKER_IMAGE": "python:3.11-slim", # LLM 실행에 사용하는 Docker 이미지 이름
-    "LLM_MOUNT_DIR": "/workspace",         # 서버의 프로젝트 폴더가 Docker 안에서 보이는 위치
-    "LLM_PYTHONPATH": "/workspace/llm/.packages", # Docker 안에서 Python 추가 패키지를 찾는 위치
-    "LLM_DOCKER_NETWORK": "host",          # Docker 네트워크 방식; host는 서버 네트워크 사용
-    "VLLM_API_KEY_ENV": "VLLM_API_KEY",     # vLLM 인증키가 저장된 환경변수 이름(키 값 아님)
+def load_config(path=CONFIG_PATH):
+    path = Path(path)
+    try:
+        config = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"설정 파일을 읽을 수 없습니다: {path} ({exc})") from exc
+    if not isinstance(config, dict):
+        raise ValueError(f"설정 파일은 JSON 객체여야 합니다: {path}")
+    return config
 
-    # 4. AI 모델 서버 및 모델 선택
-    "VLLM_URL": "https://app-17a9ea75.proxy1.ainexus.ktcloud.com", # vLLM 모델 서버 접속 주소
-    "VLLM_MODEL": "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ", # vLLM 서버에 등록된 모델 ID
-    "OLLAMA_URL": "http://172.22.0.1:20001", # Ollama 모델 서버 접속 주소
-    "OLLAMA_MODEL": "gemma3:12b",           # Ollama에서 실행할 모델 이름
-    "TRANSFORMER_MODEL_DIR": "transformer/v1/outputs/260812_category_v1_zero50", # 학습된 Transformer 모델 폴더
 
-    # 5. 프로그램 파일 위치 (프로젝트 폴더를 기준으로 입력)
-    "TRANSFORMER_SCRIPT_DIR": "transformer/v1/src", # Transformer 학습·예측 프로그램 폴더
-    "LLM_SCRIPT_DIR": "llm/v1",            # LLM 분류 프로그램 폴더
-    # vLLM 분류 프롬프트 버전 목록: (메뉴에 보일 이름, LLM_SCRIPT_DIR 안의 파일 이름, 결과 폴더 이름 뒤에 붙일 글자)
-    # 첫 번째 항목이 Enter를 눌렀을 때의 기본값입니다.
-    "VLLM_SCRIPT_VERSIONS": [
-        ("V1 (기존 프롬프트)", "classify_biofin_category_with_vllm.py", ""),
-        ("V2 (분류지침 개정 2026.10.22 반영, 명시 요건 중심)", "classify_biofin_category_with_vllm_V2.py", "_v2"),
-    ],
-    "LOCAL_CRAWLER_SCRIPT": "local_fiscal/crawl_business_docs.py", # 지방재정 자료 수집 프로그램
-    "OPEN_FISCAL_CRAWLER_SCRIPT": "open_fiscal/crawl_business_docs.py", # 열린재정 자료 수집 프로그램
-    "OPEN_FISCAL_API_SCRIPT": "open_fiscal/api_budget_list.py", # 열린재정 API 목록 수집 프로그램
-
-    # 6. AI 분류 실행 기본값 (메뉴에서 필요할 때 변경 가능)
-    "MAX_DOCUMENT_CHARS": 6000,            # 사업목적에서 AI에 전달할 최대 글자 수
-    "MAX_TOKENS": 2048,                     # vLLM이 한 번에 생성할 수 있는 최대 응답 토큰 수
-    "WORKERS": 1,                          # vLLM API에 동시에 보낼 요청 수
-    "NUM_CTX": 8192,                       # Ollama 모델이 한 번에 처리할 문맥 크기(토큰)
-    "TIMEOUT": 300,                        # AI 서버 응답을 기다리는 최대 시간(초)
-}
+try:
+    CONFIG = load_config()
+except ValueError as exc:
+    raise SystemExit(str(exc)) from exc
 
 
 def ask(prompt, default=None):
