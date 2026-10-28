@@ -1,0 +1,19 @@
+{
+  "_comments": {
+    "version": "결과 CSV의 'BAR 버전' 열에 그대로 기록됩니다. 귀속률을 바꾸면 이 값도 바꿔주세요.",
+    "rates_percent": "BIOFIN 1차 카테고리별 귀속률(%). 50이면 금액의 50%입니다. null은 아직 정해지지 않았다는 뜻이며 금액을 빈칸으로 둡니다(0원으로 계산하지 않음)."
+  },
+  "version": "BAR-미정-2026.10.28",
+  "rates_percent": {
+    "0": 0,
+    "1": null,
+    "2": null,
+    "3": null,
+    "4": null,
+    "5": null,
+    "6": null,
+    "7": null,
+    "8": null,
+    "9": null
+  }
+}

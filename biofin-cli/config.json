@@ -27,7 +27,10 @@
     "MAX_TOKENS": "vLLM이 요청 한 번에 생성할 최대 응답 토큰 수 기본값입니다.",
     "WORKERS": "vLLM API에 동시에 보낼 요청 수 기본값입니다.",
     "NUM_CTX": "Ollama 요청에 사용할 컨텍스트 크기 기본값입니다. 단위는 토큰입니다.",
-    "TIMEOUT": "AI 서버 응답을 기다릴 제한 시간 기본값입니다. 단위는 초입니다."
+    "TIMEOUT": "AI 서버 응답을 기다릴 제한 시간 기본값입니다. 단위는 초입니다.",
+    "BAR_SCRIPT": "프로젝트 폴더 기준 귀속 예산(BAR) 계산 스크립트입니다. 모델 예측이 끝나면 이어서 실행합니다.",
+    "BAR_RATES": "프로젝트 폴더 기준 카테고리별 귀속률(%) 파일입니다. 귀속률이 정해지면 이 파일만 수정합니다.",
+    "BAR_AMOUNT_COLUMNS": "귀속률을 곱할 금액 열 기본값. 쉼표로 여러 열을 지정할 수 있습니다 (예: 예산액,지출액)."
   },
   "PROJECT_DIR": null,
   "CRAWLER_DIR": "crawlers",
@@ -66,5 +69,8 @@
   "MAX_TOKENS": 2048,
   "WORKERS": 1,
   "NUM_CTX": 8192,
-  "TIMEOUT": 300
+  "TIMEOUT": 300,
+  "BAR_SCRIPT": "bar/apply_bar.py",
+  "BAR_RATES": "bar/bar_rates.json",
+  "BAR_AMOUNT_COLUMNS": "예산액"
 }

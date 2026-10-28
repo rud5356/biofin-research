@@ -9,6 +9,7 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
 
 
 # 실행 기본값은 같은 폴더의 config.json에서 관리합니다.
@@ -276,6 +277,21 @@ def run_command(cmd, root, dry_run, prepare=None):
     return result.returncode
 
 
+def run_bar(root, classified, amount_columns, unit, dry_run):
+    """분류 결과 CSV에 귀속률(BAR)을 적용한다. 호스트 Python으로 실행하며 추가 패키지가 필요 없다."""
+    cmd = [sys.executable, str(root / CONFIG["BAR_SCRIPT"]), "--input", str(root / classified),
+           "--rates", str(root / CONFIG["BAR_RATES"]), "--amount-cols", amount_columns, "--unit", unit]
+    print("\n이어서 실행할 귀속 예산(BAR) 계산 명령어:\n" + shlex.join(cmd))
+    if dry_run:
+        return 0
+    if not (root / classified).is_file():
+        print(f"분류 결과 파일이 없어 귀속 예산 계산을 건너뜁니다: {root / classified}")
+        return 0
+    result = subprocess.run(cmd, cwd=root)
+    if result.returncode != 0:
+        print(f"귀속 예산 계산에 실패했습니다. 분류 결과는 그대로 있습니다. 종료 코드: {result.returncode}")
+    return result.returncode
+
 
 def augmentation_command(root):
     script = "transformer/v1/augmentation_h200/balanced_csv.py"
@@ -414,7 +430,17 @@ def main():
             cmd += ["--retries", retries]
     if not (root / script).is_file():
         raise RuntimeError(f"실행 스크립트가 없습니다: {root / script}")
-    return run_command(cmd, root, args.dry_run)
+    if training:
+        return run_command(cmd, root, args.dry_run)
+    # 분류가 오래 걸리므로 귀속 예산 설정은 실행 전에 묻는다.
+    amount_columns = ask("귀속 예산을 계산할 금액 열 (쉼표로 여러 개 가능)", CONFIG["BAR_AMOUNT_COLUMNS"])
+    unit = ["원", "백만원"][choose("입력 금액 단위 (귀속 예산은 원 단위까지 반올림)",
+                                  ["원 (지방재정365)", "백만원 (열린재정)"]) - 1]
+    code = run_command(cmd, root, args.dry_run)
+    if code != 0:
+        return code
+    classified = f"{output}/classified.csv" if transformer else f"{output}/{Path(input_file).stem}_llm_classified.csv"
+    return run_bar(root, classified, amount_columns, unit, args.dry_run)
 
 
 if __name__ == "__main__":

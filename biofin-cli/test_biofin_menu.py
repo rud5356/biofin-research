@@ -84,7 +84,7 @@ class MenuTests(unittest.TestCase):
         self.assertNotIn("--until", cmd)
 
     def test_vllm_api_options(self):
-        cmd = self.command([2, 3, 1])
+        cmd = self.command([2, 3, 1, 1])
         self.assertIn("llm/v1/classify_biofin_category_with_vllm.py", cmd)
         self.assertIn("VLLM_API_KEY", cmd)
         self.assertIn("--vllm-url", cmd)
@@ -94,15 +94,33 @@ class MenuTests(unittest.TestCase):
             self.assertNotIn(option, cmd)
 
     def test_vllm_v2_script(self):
-        cmd = self.command([2, 3, 2])
+        cmd = self.command([2, 3, 2, 2])
         self.assertIn("llm/v1/classify_biofin_category_with_vllm_V2.py", cmd)
         self.assertIn("--vllm-url", cmd)
 
     def test_ollama_options_preserved(self):
-        cmd = self.command([2, 2])
+        cmd = self.command([2, 2, 1])
         self.assertIn("--ollama-url", cmd)
         self.assertIn("--num-ctx", cmd)
         self.assertNotIn("--max-tokens", cmd)
+
+    def test_prediction_chains_bar_after_classification(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "results").mkdir()
+            (root / "results" / "input_llm_classified.csv").touch()
+            ok = unittest.mock.Mock(returncode=0)
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    patch.object(menu.subprocess, "run", return_value=ok) as run:
+                self.assertEqual(menu.run_bar(root, "results/input_llm_classified.csv", "예산액,지출액", "백만원", False), 0)
+            cmd = run.call_args[0][0]
+            self.assertEqual(cmd[1], str(root / "bar/apply_bar.py"))
+            self.assertEqual(cmd[cmd.index("--input") + 1], str(root / "results/input_llm_classified.csv"))
+            self.assertEqual(cmd[cmd.index("--amount-cols") + 1], "예산액,지출액")
+            self.assertEqual(cmd[cmd.index("--unit") + 1], "백만원")
+            with contextlib.redirect_stdout(io.StringIO()), patch.object(menu.subprocess, "run") as run:
+                self.assertEqual(menu.run_bar(root, "results/missing.csv", "예산액", "원", False), 0)
+                run.assert_not_called()
 
     def test_original_only(self):
         cmd = self.command([1, 1, 1, 2, 2])
