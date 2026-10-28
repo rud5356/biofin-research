@@ -276,6 +276,41 @@ def run_command(cmd, root, dry_run, prepare=None):
     return result.returncode
 
 
+
+def augmentation_command(root):
+    script = "transformer/v1/augmentation_h200/balanced_csv.py"
+    if not (root / script).is_file():
+        raise RuntimeError(f"증강 스크립트가 없습니다: {root / script}")
+    if not hasattr(os, "getuid"):
+        raise RuntimeError("증강 Docker 실행은 Linux 회사 서버에서 사용해주세요.")
+    input_file = project_path("라벨이 있는 원본 CSV", CONFIG["DOCUMENT_DIR"], root, "file")
+    output = project_path("증강 결과 폴더", "transformer/v1/outputs/augmentation", root, "output")
+    backend = "vllm" if choose("증강 API", ["vLLM", "Ollama"]) == 1 else "ollama"
+    url = ask("API 기본 URL (/v1 제외)", CONFIG["VLLM_URL" if backend == "vllm" else "OLLAMA_URL"])
+    model = ask("모델 ID", CONFIG["VLLM_MODEL" if backend == "vllm" else "OLLAMA_MODEL"])
+    while True:
+        target = integer("카테고리별 최대 건수 (원본+증강, 50의 배수)", 400, 50)
+        if int(target) % 50 == 0:
+            break
+        print("50의 배수를 입력해주세요.")
+    mount = CONFIG["LLM_MOUNT_DIR"]
+    cmd = ["docker", "run", "--rm", "-it", "--network", CONFIG["LLM_DOCKER_NETWORK"],
+           "--user", f"{os.getuid()}:{os.getgid()}", "-e", "AUG_API_KEY"]
+    if backend == "vllm":
+        # Pass the host variable by name, never expose its value in the command.
+        cmd += ["-e", CONFIG["VLLM_API_KEY_ENV"], "-e",
+                f"AUG_API_KEY_ENV={CONFIG['VLLM_API_KEY_ENV']}"]
+    cmd += ["-v", f"{root}:{mount}", "-w", mount, CONFIG["LLM_DOCKER_IMAGE"],
+            "python", "-u", script, "--input", f"{mount}/{input_file}",
+            "--output", f"{mount}/{output}", "--backend", backend,
+            "--base-url", url, "--model", model, "--target-per-category", target]
+    print(f"원본+증강 합계가 가장 적은 1차 카테고리부터 50개씩 생성하고, 모든 카테고리가 {target}개가 되면 종료합니다. 같은 폴더로 재실행하면 이어서 생성합니다.")
+    print("CSV 사업명·예산정보를 사용합니다. HWP/PDF 본문은 읽지 않습니다.")
+    print("결과는 balanced_h200_v1/의 JSONL입니다. 학습 전 build_merged_training_csv.py로 병합하세요.")
+    print(f"서버 저장 위치: {root / output / 'balanced_h200_v1'}")
+    return cmd
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-dir", default=CONFIG["PROJECT_DIR"] or os.getcwd(), help="호스트의 biofin_cls3 프로젝트 경로")
@@ -286,7 +321,9 @@ def main():
     if not root.is_dir():
         parser.error(f"프로젝트 폴더가 없습니다: {root}")
     print(f"BIOFIN 실행 도우미\n프로젝트: {root}\n파일과 폴더는 목록에서 번호로 선택하세요.")
-    task = choose("작업 선택", ["모델 학습", "모델 예측", "자료 수집 (크롤러)"])
+    task = choose("작업 선택", ["모델 학습", "모델 예측", "자료 수집 (크롤러)", "데이터 증강 (카테고리별 최대 400개)"])
+    if task == 4:
+        return run_command(augmentation_command(root), root, args.dry_run)
     if task == 3:
         cmd, container, modules = crawl_command(root, args.crawler_dir)
         return run_command(cmd, root, args.dry_run, lambda: prepare_container(container, modules))

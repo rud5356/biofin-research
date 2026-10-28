@@ -1,3 +1,5 @@
+> 과거 JSONL 반복 생성 안내입니다. 현재 400개 생성은 [새 실행 안내](BALANCED_RUNBOOK_KO.md)를 사용하세요. 아래 날짜·경로는 과거 예시입니다.
+
 > 지정된 BIOFIN CSV의 카테고리 균형 증강은 [BALANCED_RUNBOOK_KO.md](BALANCED_RUNBOOK_KO.md)의 balanced_csv.py를 사용하세요. 아래는 기존 일반 JSONL 방식입니다.
 
 # H200 텍스트 분류 데이터 증강 실행 안내

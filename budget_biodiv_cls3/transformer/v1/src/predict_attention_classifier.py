@@ -2,6 +2,7 @@
 
 입력 예산 CSV와 ``연도_소관명_세부사업명_긴ID`` 형식의 문서 파일을
 매칭하고, 학습 때와 동일하게 예산정보와 문서 본문을 결합해 추론한다.
+사용 가능한 문서가 없는 사업은 CSV 예산정보만으로 추론한다.
 예측 결과, 문서 조각별 Attention 가중치와 독립 실행형 히트맵 HTML을
 한 번에 저장한다. CSV에 기준 라벨이 있으면 참고 평가 지표도 생성한다.
 """
@@ -87,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--encoder_chunk_batch_size", type=int, default=None)
     parser.add_argument("--mixed_precision", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hwp_com", action="store_true")
-    parser.add_argument("--limit", type=int, default=0, help="앞 N개 문서만 예측, 0은 전체")
+    parser.add_argument("--limit", type=int, default=0, help="문서 우선 최대 N개 사업 예측, 0은 CSV 전체")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--heatmap", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--heatmap_output", default="attention_heatmap.html")
@@ -295,6 +296,7 @@ def build_prediction_records(
     success_rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     used_source_rows: dict[int, str] = {}
+    parse_failures: dict[int, str] = {}
     for position, path in enumerate(selected, start=1):
         row, match_type, detail = _match_by_filename_or_id(
             path, budget, filename_lookup, id_lookup
@@ -332,6 +334,7 @@ def build_prediction_records(
             body = extract_document(path, use_hwp_com=use_hwp_com)
         except DocumentParseError as exc:
             failures.append(_failure_row(exc.reason, exc.detail, identity))
+            parse_failures[source_row] = exc.reason
             continue
 
         metadata_text = build_budget_metadata_text(row)
@@ -365,6 +368,36 @@ def build_prediction_records(
                 len(records),
                 len(failures),
             )
+    # 문서 없는 행, 매칭 실패 행, 본문 추출 실패 행도 모두 추론한다.
+    # 먼저 모든 문서를 처리하여 다른 문서가 성공한 사업을 중복 생성하지 않는다.
+    for _, row in budget.iterrows():
+        if limit and len(records) >= limit:
+            break
+        source_row = int(row["_source_row"])
+        if source_row in used_source_rows:
+            continue
+        true_label = int(row["_true_label"]) if pd.notna(row["_true_label"]) else None
+        record = {
+            "year": int(row["_year"]) if pd.notna(row["_year"]) else None,
+            "ministry": str(row["소관명"]),
+            "activity_name": str(row["세부사업명"]),
+            "file_path": f"metadata://{Path(row['_source_file']).name}#row={source_row}",
+            "label": true_label if true_label is not None else 0,
+            "true_label": true_label,
+            "text": build_budget_metadata_text(row),
+            "source_type": "budget_metadata",
+            "match_type": "METADATA_FALLBACK",
+            "fallback_reason": parse_failures.get(source_row, "NO_USABLE_MATCHED_DOCUMENT"),
+            "source_file": str(row["_source_file"]),
+            "source_row": source_row,
+        }
+        records.append(record)
+        success_rows.append(
+            {key: value for key, value in record.items() if key not in {"text", "label"}}
+            | {"text_length": len(record["text"])}
+        )
+    LOGGER.info("예측 입력: 문서 %d건, CSV 정보 대체 %d건", len(used_source_rows),
+                sum(r["source_type"] == "budget_metadata" for r in records))
     return records, pd.DataFrame(success_rows), pd.DataFrame(failures)
 
 
@@ -473,6 +506,7 @@ def predict_records(
                     "pred_category": LABEL_NAMES.get(pred_label, "알 수 없음"),
                     "probability": probability,
                     "source_row": int(record["source_row"]),
+                    "fallback_reason": record.get("fallback_reason", ""),
                 }
                 if record.get("true_label") is not None:
                     row["true_label"] = int(record["true_label"])
@@ -525,6 +559,8 @@ def save_optional_evaluation(
         "total_predictions": len(prediction_rows),
         "labeled_predictions": len(labeled),
         "unlabeled_predictions": len(prediction_rows) - len(labeled),
+        "document_predictions": sum(r.get("source_type") == "document" for r in prediction_rows),
+        "metadata_predictions": sum(r.get("source_type") == "budget_metadata" for r in prediction_rows),
     }
     if not labeled:
         write_json(summary, output_dir / "prediction_summary.json")
@@ -584,7 +620,7 @@ def main(argv: list[str] | None = None) -> int:
             ]
             LOGGER.info("제외 폴더 적용: 문서 %d개 제외", before - len(documents))
         if not documents:
-            raise ValueError("예측할 사업설명자료가 없습니다")
+            LOGGER.info("사업설명자료가 없어 CSV 사업정보만으로 예측합니다.")
         LOGGER.info("예측 문서 %d개, 예산 행 %d개를 확인했습니다.", len(documents), len(budget))
 
         records, success, failed = build_prediction_records(
@@ -598,7 +634,7 @@ def main(argv: list[str] | None = None) -> int:
         write_csv(success, output_dir / "dataset_match_success.csv")
         write_csv(failed, output_dir / "dataset_match_failed.csv")
         if not records:
-            raise ValueError("매칭 및 본문 추출에 성공한 예측 문서가 없습니다")
+            raise ValueError("예측할 사업이 없습니다")
 
         predictions, _, num_labels = predict_records(args, records, output_dir)
         save_classified_budget(

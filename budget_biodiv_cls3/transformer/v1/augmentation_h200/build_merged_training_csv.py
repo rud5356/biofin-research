@@ -1,4 +1,6 @@
 """Build a new v1 training dataset; never modify source CSVs or JSONLs."""
+from balanced_csv import normalize_labels
+
 import argparse
 from collections import Counter
 import csv
@@ -28,6 +30,11 @@ def build(original_path, label_path, augmentation_dir, output_dir):
     fields, originals = read_rows(original_path)
     label_fields, labels = read_rows(label_path)
     by_key = {r['business_key']: r for r in originals}
+    all_label_keys = [r['business_key'] for r in labels]
+    if len(set(all_label_keys)) != len(all_label_keys) or '' in all_label_keys:
+        raise ValueError('business_key must be nonempty and unique in label CSV')
+    labels = [normalized for row in labels if (normalized := normalize_labels(row)) is not None]
+    label_fields = list(dict.fromkeys(label_fields + ['1차 카테고리', '하위 카테고리']))
     gold = {r['business_key']: r for r in labels}
     if len(by_key) != len(originals) or len(gold) != len(labels) or '' in by_key or '' in gold:
         raise ValueError('business_key must be nonempty and unique in both source CSVs')

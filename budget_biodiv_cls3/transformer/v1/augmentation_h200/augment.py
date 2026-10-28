@@ -10,6 +10,7 @@ except ImportError:  # Windows development/test support
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import random
@@ -149,7 +150,7 @@ class Store:
 
 def api_json(url, payload=None, timeout=120):
     headers = {"Content-Type": "application/json"}
-    key = os.environ.get("AUG_API_KEY")
+    key = os.environ.get("AUG_API_KEY") or os.environ.get(os.environ.get("AUG_API_KEY_ENV", "VLLM_API_KEY"))
     if key:
         headers["Authorization"] = "Bearer " + key
     request = urllib.request.Request(url, headers=headers,
@@ -173,20 +174,26 @@ def generate(args, text, label, remaining):
             "Vary wording and sentence structure. Return only a JSON object "
             "with key texts containing an array of distinct paraphrase strings. "
             "Do not include label names in the paraphrases unless present in the source.")},
-        {"role": "user", "content": json.dumps(
-            {"source_text": text, "label": label, "count": args.variants}, ensure_ascii=False)}]
+        # A raw JSON user message made some models echo the input back instead of paraphrasing.
+        {"role": "user", "content": (
+            f"Write {args.variants} distinct Korean paraphrases of the source text below "
+            f"(classification label: {label}). Keep the same numbers and facts.\n\n"
+            f"<source>\n{text}\n</source>")}]
     body = {"model": args.model, "messages": messages, "stream": False}
     if args.backend == "ollama":
         endpoint = "/api/chat"
         body.update(format="json", options={"temperature": 0.8, "num_predict": args.max_tokens})
     else:
         endpoint = "/v1/chat/completions"
-        body.update(temperature=0.8, max_tokens=args.max_tokens,
-                    response_format={"type": "json_object"})
+        schema = {"type": "object", "additionalProperties": False, "required": ["texts"],
+                  "properties": {"texts": {"type": "array", "items": {"type": "string"},
+                                           "minItems": 1, "maxItems": args.variants}}}
+        body.update(temperature=0.8, max_tokens=args.max_tokens, response_format={
+            "type": "json_schema", "json_schema": {"name": "paraphrases", "strict": True, "schema": schema}})
     # Hard wall-clock deadline even if the peer keeps slowly sending bytes.
     def alarm_handler(signum, frame):
         raise Deadline()
-    hard_deadline = hasattr(signal, "SIGALRM")
+    hard_deadline = hasattr(signal, "SIGALRM") and math.isfinite(remaining)
     if hard_deadline:
         previous = signal.signal(signal.SIGALRM, alarm_handler)
         signal.setitimer(signal.ITIMER_REAL, max(0.001, remaining))

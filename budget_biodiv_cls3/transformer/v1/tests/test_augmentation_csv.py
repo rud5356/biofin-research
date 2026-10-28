@@ -6,7 +6,7 @@ import sys
 
 SRC = Path(__file__).resolve().parents[1] / 'src'
 sys.path.insert(0, str(SRC))
-sys.path.insert(0, str(SRC.parents[2] / 'augmentation_h200'))
+sys.path.insert(0, str(SRC.parent / 'augmentation_h200'))
 from augmentation_csv import append_train_augmentations, read_original_frame
 from build_merged_training_csv import build
 from build_dataset import load_label_data

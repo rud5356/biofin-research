@@ -45,7 +45,7 @@ class MenuTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "input.csv").write_text(csv_text, encoding="utf-8")
-            for script in ["llm/v1/classify_biofin_category_with_vllm.py",
+            for script in ["transformer/v1/augmentation_h200/balanced_csv.py", "llm/v1/classify_biofin_category_with_vllm.py",
                            "llm/v1/classify_biofin_category_with_vllm_V2.py",
                            "llm/v1/classify_biofin_category_with_ollama.py",
                            "transformer/v1/src/train_attention_classifier.py"]:
@@ -66,6 +66,22 @@ class MenuTests(unittest.TestCase):
                 run.assert_not_called()
             commands = [line for line in output.getvalue().splitlines() if line.startswith("docker ")]
             return shlex.split(commands[0])
+
+    def test_real_task_menu_offers_augmentation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), patch("sys.argv", ["biofin_menu.py", "--project-dir", folder, "--dry-run"]), patch("builtins.input", return_value="4"), patch.object(menu, "augmentation_command", return_value=["docker", "run"]) as command:
+                self.assertEqual(menu.main(), 0)
+            command.assert_called_once()
+            self.assertIn("4. 데이터 증강", output.getvalue())
+
+    def test_augmentation_menu_builds_finite_generation_command(self):
+        cmd = self.command([4, 1])
+        self.assertIn("transformer/v1/augmentation_h200/balanced_csv.py", cmd)
+        self.assertEqual(cmd[cmd.index("--target-per-category") + 1], "400")
+        self.assertEqual(cmd[cmd.index("--base-url") + 1], menu.CONFIG["VLLM_URL"])
+        self.assertIn("AUG_API_KEY_ENV=VLLM_API_KEY", cmd)
+        self.assertNotIn("--until", cmd)
 
     def test_vllm_api_options(self):
         cmd = self.command([2, 3, 1])

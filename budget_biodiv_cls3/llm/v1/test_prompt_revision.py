@@ -10,8 +10,8 @@ import classify_biofin_category_with_vllm as vllm
 
 
 class RevisionTests(unittest.TestCase):
-    def test_backends_share_prompt(self):
-        self.assertEqual(ollama.SYSTEM_PROMPT, vllm.SYSTEM_PROMPT)
+    def test_backend_prompt_templates_render(self):
+        # vLLM has its own versioned classification policy; the I/O contract is shared.
         self.assertEqual(ollama.PROMPT_TEMPLATE, vllm.PROMPT_TEMPLATE)
         for module in (ollama, vllm):
             module.build_prompt({}, '사업목적 본문')  # JSON braces survive format().

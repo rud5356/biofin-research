@@ -10,7 +10,7 @@
 | [LLM v1](budget_biodiv_cls3/llm/v1/README.md) | 상위 카테고리 0~9, Ollama·vLLM 분류 |
 | [LLM v2](budget_biodiv_cls3/llm/v2/README.md) | 하위 카테고리 분류 |
 | [Transformer](budget_biodiv_cls3/transformer/README.md) | 모델 학습·예측 |
-| [데이터 증강](budget_biodiv_cls3/augmentation_h200/README.md) | 증강 및 학습 데이터 구성 |
+| [데이터 증강](budget_biodiv_cls3/transformer/v1/augmentation_h200/README.md) | 증강 및 학습 데이터 구성 |
 | [웹 데모](budget_biodiv_cls3/web/README.md) | 전문가 검증 화면 프로토타입 |
 | [파이프라인](budget_biodiv_cls3/pipeline/README.md) | 단계별 분류 구조 |
 | [실행 도우미](biofin-cli/README.md) | 서버에서 사용할 CLI |

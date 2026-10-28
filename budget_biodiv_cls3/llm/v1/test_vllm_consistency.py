@@ -18,6 +18,12 @@ class ConsistencyTest(unittest.TestCase):
     def test_unrelated_rnd_stays_zero(self):
         r,n=self.check(0,'일반 산업 기술','양자 개발(R&D)','')
         self.assertEqual((r['label'],n),(0,0))
+    def test_abs_rnd_keeps_highest_priority(self):
+        r,n=self.check(1,'나고야의정서 ABS 이행 연구로 1을 적용한다.','ABS 이행(R&D)','')
+        self.assertEqual((r['label'],r['model_original_label'],n),(1,1,0))
+    def test_abs_conflict_recheck_keeps_one(self):
+        r,n=self.check(1,'2를 적용한다.','ABS 이행(R&D)',response(1,'나고야 이행으로 1을 적용한다.'))
+        self.assertEqual((r['label'],n),(1,1))
     def test_no_numbers_from_comparison(self):
         r,n=self.check(4,'2가 아닌 4를 적용한다.','일반 전환', '')
         self.assertEqual((r['label'],n),(4,0))

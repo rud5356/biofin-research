@@ -169,7 +169,7 @@ LLM은 정답 컬럼과 예측을 비교하여 정확도·Macro Precision/Recall
 - 파이프라인 어댑터를 실제 모델에 연결하고, 검증 화면의 수정 결과를 저장·추적할 수 있게 연동한다.
 - 처리 시간·비용·검수 시간과 정확도를 함께 측정해 현업 적용 효과를 평가한다.
 
-근거: [학습 코드](budget_biodiv_cls3/transformer/v1/src/train_attention_classifier.py), [증강 코드](budget_biodiv_cls3/augmentation_h200/balanced_csv.py), [LLM 파서](budget_biodiv_cls3/llm/document_parser.py).
+근거: [학습 코드](budget_biodiv_cls3/transformer/v1/src/train_attention_classifier.py), [증강 코드](budget_biodiv_cls3/transformer/v1/augmentation_h200/balanced_csv.py), [LLM 파서](budget_biodiv_cls3/llm/document_parser.py).
 
 ## 11. 내가 직접 구현한 부분
 
