@@ -176,6 +176,18 @@ class BalancedTests(unittest.TestCase):
                 b.run(args)
                 generate.assert_not_called()
 
+    def test_completed_generation_builds_merged_csv_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, merged = Path(tmp) / "source.csv", Path(tmp) / "merged"
+            fixture(source)
+            args = arguments(source, Path(tmp) / "out", "--target-per-category", "50",
+                             "--merged-output-dir", str(merged))
+            b.run(args)
+            report = json.loads((merged / "merge_report.json").read_text(encoding="utf-8"))
+            self.assertTrue((merged / "open_fiscal_2023_augmented.csv").exists())
+            self.assertEqual(report["counts"]["original_rows"], 103)
+            b.run(args)  # Rerun after completion keeps the existing merged folder.
+
     def test_batch_larger_than_remaining_does_not_overshoot(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "source.csv"

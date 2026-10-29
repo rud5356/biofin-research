@@ -345,6 +345,7 @@ def _run(args):
         raise ValueError("Source CSV cannot reside in the generated output directory")
     store = BatchStore(args, fingerprint)
     batches = 0
+    completed = False
     try:
         store.ensure_space(0)
         while not augment.STOP and time.time() < deadline:
@@ -359,6 +360,7 @@ def _run(args):
             if not pending:
                 status(phase="목표 달성", category="-", pending=0, batch_size=0)
                 LOG.info("Target reached: totals=%s generated=%s", dict(totals), dict(retained))
+                completed = True
                 return
             label = choose_category(pending, totals)
             LOG.info("selected=%s original=%d retained=%d", label, original[label], retained[label])
@@ -395,6 +397,22 @@ def _run(args):
         status(phase="종료 시각 도달 또는 중단 요청")
     finally:
         store.close()
+        if completed and getattr(args, "merged_output_dir", None):
+            merge(args, store.directory)
+
+
+def merge(args, directory):
+    """Build the training CSV (originals + augmentations) once generation is complete."""
+    from build_merged_training_csv import build
+    target = Path(args.merged_output_dir)
+    if target.exists():
+        LOG.info("통합 CSV 폴더가 이미 있어 다시 만들지 않습니다: %s", target.resolve())
+        return
+    LOG.info("증강 완료, 학습용 통합 CSV 생성 중: %s", target.resolve())
+    report = build(args.input, args.input, directory, target)
+    LOG.info("통합 CSV 생성 완료 | 파일=%s | 증강 사용=%d | 카테고리별 증강=%s",
+             report["csv"], report["counts"].get("augmentation_kept_rows", 0),
+             report["augmentation_by_category"])
 
 
 def parser():
@@ -408,6 +426,8 @@ def parser():
     p.add_argument("--encoding", default="utf-8-sig")
     p.add_argument("--balance-batch-size", type=int, default=50)
     p.add_argument("--max-requests-per-batch", type=int, default=500)
+    p.add_argument("--merged-output-dir",
+                   help="After the target is reached, write the merged training CSV here (new folder)")
     p.add_argument("--plan", action="store_true", help="Original CSV distribution only; no writes/API/deletion")
     return p
 

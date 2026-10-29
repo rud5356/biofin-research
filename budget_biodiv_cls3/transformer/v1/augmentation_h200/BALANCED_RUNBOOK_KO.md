@@ -47,6 +47,9 @@ UTF-8 BOM CSV를 기본으로 읽으며 split 열이 있으면 train 행만 사�
 
     python transformer/v1/augmentation_h200/build_merged_training_csv.py --original-csv document/original.csv --label-csv document/labeled.csv --augmentation-dir transformer/v1/outputs/augmentation/balanced_h200_v1 --output-dir transformer/v1/outputs/merged_training
 
+메뉴로 실행하면 목표 달성 후 위 병합을 자동으로 실행해 <결과 폴더>/merged_training/open_fiscal_2023_augmented.csv를 만듭니다(직접 실행 시 --merged-output-dir).
+이미 끝난 결과 폴더로 다시 실행하면 생성 없이 통합 CSV만 만들고, merged_training 폴더가 이미 있으면 건너뜁니다.
+
 학습 메뉴에서 원본 + 증강 통합 CSV를 선택합니다.
 검증/시험 원본에 연결된 증강문은 학습에서 제외되므로 실제 학습 수는 목표보다 적을 수 있습니다.
 이미 병합 CSV가 있으면 다시 생성하지 않고 학습 메뉴의 클래스별 최대 개수를 400으로 지정할 수 있습니다.

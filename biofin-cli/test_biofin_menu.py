@@ -82,6 +82,7 @@ class MenuTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--base-url") + 1], menu.CONFIG["VLLM_URL"])
         self.assertIn("AUG_API_KEY_ENV=VLLM_API_KEY", cmd)
         self.assertNotIn("--until", cmd)
+        self.assertTrue(cmd[cmd.index("--merged-output-dir") + 1].endswith("/merged_training"))
 
     def test_vllm_api_options(self):
         cmd = self.command([2, 3, 1, 1])

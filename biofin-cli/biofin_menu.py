@@ -319,11 +319,13 @@ def augmentation_command(root):
     cmd += ["-v", f"{root}:{mount}", "-w", mount, CONFIG["LLM_DOCKER_IMAGE"],
             "python", "-u", script, "--input", f"{mount}/{input_file}",
             "--output", f"{mount}/{output}", "--backend", backend,
-            "--base-url", url, "--model", model, "--target-per-category", target]
+            "--base-url", url, "--model", model, "--target-per-category", target,
+            "--merged-output-dir", f"{mount}/{output}/merged_training"]
     print(f"원본+증강 합계가 가장 적은 1차 카테고리부터 50개씩 생성하고, 모든 카테고리가 {target}개가 되면 종료합니다. 같은 폴더로 재실행하면 이어서 생성합니다.")
     print("CSV 사업명·예산정보를 사용합니다. HWP/PDF 본문은 읽지 않습니다.")
-    print("결과는 balanced_h200_v1/의 JSONL입니다. 학습 전 build_merged_training_csv.py로 병합하세요.")
     print(f"서버 저장 위치: {root / output / 'balanced_h200_v1'}")
+    print(f"완료되면 학습용 통합 CSV를 자동 생성합니다: {root / output / 'merged_training' / 'open_fiscal_2023_augmented.csv'}")
+    print("이미 증강이 끝난 폴더를 다시 선택하면 생성 없이 통합 CSV만 만듭니다.")
     return cmd
 
 
