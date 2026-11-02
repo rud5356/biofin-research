@@ -1,0 +1,26 @@
+{
+  "SYSTEM_PROMPT": {
+    "before": 10406,
+    "after": 11435,
+    "before_no_whitespace": 8372,
+    "after_no_whitespace": 9157
+  },
+  "RND_RULES": {
+    "before": 1063,
+    "after": 848,
+    "before_no_whitespace": 854,
+    "after_no_whitespace": 658
+  },
+  "INSTITUTION_RULES": {
+    "before": 1200,
+    "after": 1396,
+    "before_no_whitespace": 1015,
+    "after_no_whitespace": 1167
+  },
+  "PROMPT_TEMPLATE": {
+    "before": 592,
+    "after": 626,
+    "before_no_whitespace": 489,
+    "after_no_whitespace": 514
+  }
+}
