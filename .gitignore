@@ -31,6 +31,11 @@ node_modules/
 !budget_biodiv_cls3/web/src/data/
 !budget_biodiv_cls3/web/src/data/**
 
+# 예외: EXAMPLE 시연 데이터는 재생성되는 결과물이 아니라 고정된 입력/정답/대조 결과물
+!budget_biodiv_cls3/EXAMPLE/**/*.csv
+!budget_biodiv_cls3/EXAMPLE/outputs/
+!budget_biodiv_cls3/EXAMPLE/outputs/**
+
 # 내역사업 분류 복사본 (원본 HWP 파일 복사본, 재생성 가능)
 국가생물다양성_열린재정 데이터/내역사업있음/
 
