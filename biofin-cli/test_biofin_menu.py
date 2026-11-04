@@ -123,6 +123,36 @@ class MenuTests(unittest.TestCase):
                 self.assertEqual(menu.run_bar(root, "results/missing.csv", "예산액", "원", False), 0)
                 run.assert_not_called()
 
+    def test_transformer_bar_runs_in_container(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "results").mkdir()
+            (root / "results" / "classified.csv").touch()
+            ok = unittest.mock.Mock(returncode=0)
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    patch.object(menu.subprocess, "run", return_value=ok) as run:
+                self.assertEqual(menu.run_bar(root, "results/classified.csv", "예산액", "백만원", False,
+                                              ("biofin", "/work/biofin_cls3")), 0)
+            cmd = run.call_args[0][0]
+            self.assertEqual(cmd[:7], ["docker", "exec", "-w", "/work/biofin_cls3", "biofin", "python", "bar/apply_bar.py"])
+            self.assertEqual(cmd[cmd.index("--input") + 1], "results/classified.csv")
+            self.assertEqual(cmd[cmd.index("--rates") + 1], menu.CONFIG["BAR_RATES"])
+
+    def test_restore_owner_after_docker_exec(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            ok = unittest.mock.Mock(returncode=0)
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    patch.object(menu.os, "getuid", return_value=1000, create=True), \
+                    patch.object(menu.os, "getgid", return_value=1001, create=True), \
+                    patch.object(menu.subprocess, "run", return_value=ok) as run:
+                self.assertEqual(menu.restore_owner(root, "biofin", "/work/biofin_cls3", "results", False), 0)
+                run.assert_not_called()
+                (root / "results").mkdir()
+                self.assertEqual(menu.restore_owner(root, "biofin", "/work/biofin_cls3", "results", False), 0)
+            self.assertEqual(run.call_args[0][0],
+                             ["docker", "exec", "biofin", "chown", "-R", "1000:1001", "/work/biofin_cls3/results"])
+
     def test_original_only(self):
         cmd = self.command([1, 1, 1, 2, 2])
         self.assertEqual(cmd[cmd.index("--augmentation_per_class") + 1], "0")

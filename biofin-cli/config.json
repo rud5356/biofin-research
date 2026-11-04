@@ -47,7 +47,7 @@
   "VLLM_MODEL": "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ",
   "OLLAMA_URL": "https://app-117d00c0.proxy2.ainexus.ktcloud.com/",
   "OLLAMA_MODEL": "gemma3:12b",
-  "TRANSFORMER_MODEL_DIR": "transformer/v1/outputs/260812_category_v1_zero50",
+  "TRANSFORMER_MODEL_DIR": "transformer/v1/outputs",
   "TRANSFORMER_SCRIPT_DIR": "transformer/v1/src",
   "LLM_SCRIPT_DIR": "llm/v1",
   "VLLM_SCRIPT_VERSIONS": [

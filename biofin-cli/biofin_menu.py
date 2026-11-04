@@ -140,6 +140,7 @@ def project_path(prompt, default, root, kind):
             print("기존 결과 폴더입니다. 실행 스크립트에 따라 파일이 덮어써질 수 있습니다.")
             if ask("이 폴더를 사용할까요? (y/N)", "n").lower() != "y":
                 continue
+        print(f"→ {prompt}: {relative.as_posix()}")
         return relative.as_posix()
 
 
@@ -277,19 +278,45 @@ def run_command(cmd, root, dry_run, prepare=None):
     return result.returncode
 
 
-def run_bar(root, classified, amount_columns, unit, dry_run):
-    """분류 결과 CSV에 귀속률(BAR)을 적용한다. 호스트 Python으로 실행하며 추가 패키지가 필요 없다."""
-    cmd = [sys.executable, str(root / CONFIG["BAR_SCRIPT"]), "--input", str(root / classified),
-           "--rates", str(root / CONFIG["BAR_RATES"]), "--amount-cols", amount_columns, "--unit", unit]
-    print("\n이어서 실행할 귀속 예산(BAR) 계산 명령어:\n" + shlex.join(cmd))
+def run_bar(root, classified, amount_columns, unit, dry_run, docker=None):
+    """분류 결과 CSV에 귀속률(BAR)을 적용한다. 추가 패키지가 필요 없다.
+
+    docker=(컨테이너, 내부 프로젝트 경로)이면 분류를 실행한 컨테이너 안에서, 아니면 호스트 Python으로 실행한다.
+    """
+    options = ["--amount-cols", amount_columns, "--unit", unit]
+    if docker:
+        container, workdir = docker
+        cmd = ["docker", "exec", "-w", workdir, container, "python", CONFIG["BAR_SCRIPT"],
+               "--input", classified, "--rates", CONFIG["BAR_RATES"], *options]
+    else:
+        cmd = [sys.executable, str(root / CONFIG["BAR_SCRIPT"]), "--input", str(root / classified),
+               "--rates", str(root / CONFIG["BAR_RATES"]), *options]
     if dry_run:
+        print("\n이어서 실행할 귀속 예산(BAR) 계산 명령어:\n" + shlex.join(cmd))
         return 0
+    print("\n귀속 예산(BAR) 계산")
     if not (root / classified).is_file():
         print(f"분류 결과 파일이 없어 귀속 예산 계산을 건너뜁니다: {root / classified}")
         return 0
     result = subprocess.run(cmd, cwd=root)
     if result.returncode != 0:
         print(f"귀속 예산 계산에 실패했습니다. 분류 결과는 그대로 있습니다. 종료 코드: {result.returncode}")
+    return result.returncode
+
+
+def restore_owner(root, container, workdir, output, dry_run):
+    """docker exec는 컨테이너 root로 실행되므로 결과 폴더 소유자를 호스트 계정으로 되돌린다."""
+    if not hasattr(os, "getuid"):
+        return 0
+    cmd = ["docker", "exec", container, "chown", "-R", f"{os.getuid()}:{os.getgid()}", f"{workdir}/{output}"]
+    if dry_run:
+        print("\n결과 폴더 소유자를 현재 계정으로 바꾸는 명령어:\n" + shlex.join(cmd))
+        return 0
+    if not (root / output).exists():
+        return 0
+    result = subprocess.run(cmd, cwd=root)
+    if result.returncode != 0:
+        print(f"결과 폴더 소유자를 바꾸지 못했습니다. 결과 파일은 그대로 있습니다. 종료 코드: {result.returncode}")
     return result.returncode
 
 
@@ -433,16 +460,22 @@ def main():
     if not (root / script).is_file():
         raise RuntimeError(f"실행 스크립트가 없습니다: {root / script}")
     if training:
-        return run_command(cmd, root, args.dry_run)
+        code = run_command(cmd, root, args.dry_run)
+        if transformer:
+            return restore_owner(root, container, workdir, output, args.dry_run) or code
+        return code
     # 분류가 오래 걸리므로 귀속 예산 설정은 실행 전에 묻는다.
     amount_columns = ask("귀속 예산을 계산할 금액 열 (쉼표로 여러 개 가능)", CONFIG["BAR_AMOUNT_COLUMNS"])
     unit = ["원", "백만원"][choose("입력 금액 단위 (귀속 예산은 원 단위까지 반올림)",
                                   ["원 (지방재정365)", "백만원 (열린재정)"]) - 1]
     code = run_command(cmd, root, args.dry_run)
-    if code != 0:
-        return code
-    classified = f"{output}/classified.csv" if transformer else f"{output}/{Path(input_file).stem}_llm_classified.csv"
-    return run_bar(root, classified, amount_columns, unit, args.dry_run)
+    if code == 0:
+        classified = f"{output}/classified.csv" if transformer else f"{output}/{Path(input_file).stem}_llm_classified.csv"
+        code = run_bar(root, classified, amount_columns, unit, args.dry_run,
+                       (container, workdir) if transformer else None)
+    if transformer:
+        return restore_owner(root, container, workdir, output, args.dry_run) or code
+    return code
 
 
 if __name__ == "__main__":
