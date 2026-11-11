@@ -2,7 +2,6 @@
 import argparse
 import csv
 import json
-from collections import OrderedDict
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
@@ -11,7 +10,6 @@ ENCODINGS = ("utf-8-sig", "cp949")
 CATEGORY_COLUMNS = ("pipeline_label", "LLM BIOFIN 1차 카테고리", "예측 BIOFIN 1차 카테고리")
 RATE_COLUMN = "BAR 귀속률(%)"
 STATUS_COLUMN = "BAR 적용상태"
-VERSION_COLUMN = "BAR 버전"
 # 단위별로 원 단위까지 남기는 소수 자릿수 (지방재정365는 원, 열린재정은 백만원).
 UNIT_DECIMALS = {"원": 0, "천원": 3, "백만원": 6}
 APPLIED, RATE_MISSING, NO_CATEGORY, UNKNOWN_CATEGORY ="적용", "귀속률 미정", "카테고리 없음", "알 수 없는 카테고리"
@@ -98,9 +96,9 @@ def format_amount(amount, decimals):
     return format(value.normalize(), "f") if decimals > 0 else str(value)
 
 
-def apply_bar(rows, category_column, amount_columns, rates, version, decimals=0):
-    """원본 행을 바꾸지 않고 BAR 열을 붙인 새 행 목록과 카테고리별 요약을 반환한다."""
-    result, summary = [], OrderedDict()
+def apply_bar(rows, category_column, amount_columns, rates, decimals=0):
+    """원본 행을 바꾸지 않고 BAR 열을 붙인 새 행 목록을 반환한다."""
+    result = []
     for line, row in enumerate(rows, start=2):
         category = parse_category(row[category_column])
         amounts = {column: parse_amount(row[column], column, line) for column in amount_columns}
@@ -114,40 +112,14 @@ def apply_bar(rows, category_column, amount_columns, rates, version, decimals=0)
         output = dict(row)
         output[RATE_COLUMN] = "" if rate is None else format(rate.normalize(), "f")
         output[STATUS_COLUMN] = status
-        output[VERSION_COLUMN] = version
-        key = category if category is not None else "(빈칸)"
-        item = summary.setdefault(key, {"status": status, "rate": output[RATE_COLUMN], "count": 0,
-                                        "amounts": {column: Decimal(0) for column in amount_columns},
-                                        "attributed": {column: Decimal(0) for column in amount_columns}})
-        item["count"] += 1
         for column, amount in amounts.items():
-            if amount is not None:
-                item["amounts"][column] += amount
             if rate is None or amount is None:
                 output[amount_column_name(column)] = ""
                 continue
             attributed = (amount * rate / 100).quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
             output[amount_column_name(column)] = format_amount(attributed, decimals)
-            item["attributed"][column] += attributed
         result.append(output)
-    return result, summary
-
-
-def summary_rows(summary, amount_columns, version, decimals):
-    def order(key):
-        return (0, int(key)) if key.isdigit() else (1, key)
-    rows = []
-    for key in sorted(summary, key=order):
-        item = summary[key]
-        row = OrderedDict([("BIOFIN 1차 카테고리", key), (STATUS_COLUMN, item["status"]),
-                           (RATE_COLUMN, item["rate"]), ("건수", item["count"])])
-        for column in amount_columns:
-            row[f"{column} 합계"] = format_amount(item["amounts"][column], decimals)
-            row[f"{amount_column_name(column)} 합계"] = (
-                format_amount(item["attributed"][column], decimals) if item["status"] == APPLIED else "")
-        row[VERSION_COLUMN] = version
-        rows.append(row)
-    return rows
+    return result
 
 
 def write_csv(path, fields, rows, encoding, overwrite):
@@ -182,17 +154,13 @@ def main(argv=None):
         missing = [column for column in amount_columns if column not in fields]
         if not amount_columns or missing:
             raise ValueError(f"금액 열이 없습니다: {', '.join(missing) or '(빈 값)'}")
-        new_fields = [RATE_COLUMN] + [amount_column_name(column) for column in amount_columns] + [STATUS_COLUMN, VERSION_COLUMN]
+        new_fields = [RATE_COLUMN] + [amount_column_name(column) for column in amount_columns] + [STATUS_COLUMN]
         clashes = set(fields) & set(new_fields)
         if clashes:
             raise ValueError(f"이미 BAR 열이 있습니다(BAR 적용된 파일인지 확인): {', '.join(sorted(clashes))}")
-        result, summary = apply_bar(rows, category_column, amount_columns, rates, version, decimals)
+        result = apply_bar(rows, category_column, amount_columns, rates, decimals)
         output = args.output or args.input.with_name(f"{args.input.stem}_bar.csv")
-        summary_path = output.with_name(f"{output.stem}_summary.csv")
         write_csv(output, fields + new_fields, result, encoding, args.overwrite)
-        summary_table = summary_rows(summary, amount_columns, version, decimals)
-        write_csv(summary_path, list(summary_table[0]) if summary_table else ["BIOFIN 1차 카테고리"],
-                  summary_table, encoding, args.overwrite)
     except FileExistsError as error:
         parser.exit(1, f"오류: 결과 파일이 이미 있습니다. --overwrite 또는 --output을 사용하세요: {error.filename}\n")
     except (OSError, ValueError) as error:
@@ -204,7 +172,7 @@ def main(argv=None):
     print(f"처리 {len(result):,}행: " + ", ".join(f"{status} {count:,}" for status, count in counts.items()))
     if counts.get(RATE_MISSING):
         print(f"안내: 귀속률이 정해지지 않은 카테고리는 금액을 빈칸으로 두었습니다. {args.rates}를 채운 뒤 다시 실행하세요.")
-    print(f"결과: {output}\n요약: {summary_path}")
+    print(f"결과: {output}")
     return 0
 
 
